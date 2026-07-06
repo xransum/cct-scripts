@@ -68,8 +68,9 @@ local function scanTracks()
 end
 
 local tracks = scanTracks()
-local idx     = 1
+local idx       = 1
 local isPlaying = false
+local showCredit = false
 
 -- Buttons: centered on the bottom row.
 -- PLAY and STOP must be the same length so the touch area is stable.
@@ -92,9 +93,12 @@ end
 local function drawUI()
   clearScreen()
   writeAt(1, 1, "MUSIC PLAYER", COL_HEADER, COL_BG)
+  writeAt(w, 1, "?", COL_BUTTON, COL_BG)
   writeAt(1, 2, string.rep("-", w), COL_DIM, COL_BG)
 
-  if #tracks == 0 then
+  if showCredit then
+    centerText(math.floor(h / 2), "Created by xransum", COL_HEADER, COL_BG)
+  elseif #tracks == 0 then
     centerText(math.floor(h / 2),     "No tracks in /" .. MUSIC_DIR, COL_DIM, COL_BG)
     centerText(math.floor(h / 2) + 1, "Add .dfpwm files and reboot", COL_DIM, COL_BG)
   else
@@ -154,7 +158,9 @@ while true do
   else
     local _, _, x, y = os.pullEvent("monitor_touch")
 
-    if inBtn(x, y, PREV_X, BTN_Y, PREV_LABEL) then
+    if x == w and y == 1 then
+      showCredit = not showCredit
+    elseif inBtn(x, y, PREV_X, BTN_Y, PREV_LABEL) then
       -- Cycle backwards (wraps)
       idx = ((idx - 2) % #tracks) + 1
 
@@ -177,7 +183,10 @@ while true do
         function()
           while true do
             local _, _, tx, ty = os.pullEvent("monitor_touch")
-            if inBtn(tx, ty, PLAY_X, BTN_Y, STOP_LABEL) then
+            if tx == w and ty == 1 then
+              showCredit = not showCredit
+              drawUI()
+            elseif inBtn(tx, ty, PLAY_X, BTN_Y, STOP_LABEL) then
               pendingAction = "stop";  return
             elseif inBtn(tx, ty, PREV_X, BTN_Y, PREV_LABEL) then
               pendingAction = "prev";  return
