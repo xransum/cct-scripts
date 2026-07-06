@@ -241,12 +241,21 @@ end
 
 local function drawConfirmClear()
   local w, h = mon.getSize()
+  local midH  = math.floor(h / 2)
+
   mon.setTextColor(colors.red)
   local msg = "Clear ALL " .. #todos .. " items?"
-  mon.setCursorPos(math.floor((w - #msg) / 2) + 1, math.floor(h / 2) - 1)
+  mon.setCursorPos(math.floor((w - #msg) / 2) + 1, midH - 1)
   mon.write(msg)
 
-  local row = math.floor(h / 2) + 1
+  if syncEnabled then
+    local warn = "Clears on all synced devices."
+    mon.setTextColor(colors.orange)
+    mon.setCursorPos(math.max(1, math.floor((w - #warn) / 2) + 1), midH)
+    mon.write(warn)
+  end
+
+  local row = midH + 1
   mon.setBackgroundColor(colors.green)
   mon.setTextColor(colors.white)
   yesButtonCol = math.floor(w / 2) - 8
@@ -401,12 +410,10 @@ local function handleTouch(x, y)
     end
 
     if y == clearButtonRow and x >= (w - 14) and x <= (w - 3) then
-      if #todos > CONFIRM_THRESHOLD then
+      if #todos > 0 then
         mode = "confirm_clear"
         drawMonitor()
         playSound("bell", 12, 2)
-      else
-        clearAll()
       end
       return
     end
