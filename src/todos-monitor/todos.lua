@@ -45,6 +45,20 @@ local function loadTable(path, default)
   return default
 end
 
+local function wordWrap(text, width)
+  local lines = {}
+  for word in text:gmatch("%S+") do
+    if #lines == 0 then
+      lines[1] = word
+    elseif #lines[#lines] + 1 + #word <= width then
+      lines[#lines] = lines[#lines] .. " " .. word
+    else
+      lines[#lines + 1] = word
+    end
+  end
+  return lines
+end
+
 -- ── config ───────────────────────────────────────────────────────────────────
 
 local config = loadTable(CONFIG_FILE, { singleton = false })
@@ -110,6 +124,7 @@ local itemRows = {}
 local addButtonRow, clearButtonRow
 local yesButtonRow, noButtonRow, yesButtonCol, noButtonCol
 local modeTagX, modeTagLen   -- position of the tappable mode tag on row 1
+local helpButtonRow, helpButtonX
 local mode            = "list"
 local restartRequested = false
 
@@ -182,6 +197,11 @@ local function drawList()
   clearButtonRow = h
 
   mon.setBackgroundColor(colors.black)
+  mon.setTextColor(colors.cyan)
+  helpButtonX   = w - 2
+  helpButtonRow = h
+  mon.setCursorPos(helpButtonX, h)
+  mon.write("[?]")
 end
 
 local function drawAddPrompt()
@@ -231,6 +251,66 @@ local function drawConfirmClear()
   mon.setBackgroundColor(colors.black)
 end
 
+local function drawHelp()
+  local w, h = mon.getSize()
+  local row   = 3
+
+  local function put(text, col)
+    for _, line in ipairs(wordWrap(text, w - 2)) do
+      if row > h - 2 then return end
+      mon.setTextColor(col or colors.white)
+      mon.setCursorPos(2, row)
+      mon.write(line)
+      row = row + 1
+    end
+  end
+
+  -- Title + close hint
+  local title = "HELP"
+  local hint  = "[tap:close]"
+  mon.setTextColor(colors.yellow)
+  mon.setCursorPos(math.floor((w - #title) / 2) + 1, 1)
+  mon.write(title)
+  if w >= #title + #hint + 4 then
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(w - #hint + 1, 1)
+    mon.write(hint)
+  end
+
+  -- Top separator
+  mon.setTextColor(colors.gray)
+  mon.setCursorPos(1, 2)
+  mon.write(string.rep("-", w))
+
+  -- Mode tags
+  put("[shared]",  colors.lime)
+  put("Syncs todos with other computers via rednet. Needs a wireless modem.", colors.white)
+  put("[private]", colors.orange)
+  put("Local list only. Sync disabled even with a modem.", colors.white)
+  put("[offline]", colors.gray)
+  put("No modem detected. Standalone only.", colors.white)
+
+  -- Divider + controls
+  if row <= h - 2 then
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(1, row)
+    mon.write(string.rep("-", w))
+    row = row + 1
+  end
+  put("Tap item: toggle  Tap [X]: delete", colors.white)
+  put("ADD ITEM: add  CLEAR ALL: wipe list", colors.white)
+
+  -- Bottom separator + credit
+  mon.setTextColor(colors.gray)
+  mon.setCursorPos(1, h - 1)
+  mon.write(string.rep("-", w))
+
+  local credit = "-- github.com/xransum"
+  mon.setTextColor(colors.cyan)
+  mon.setCursorPos(math.max(1, math.floor((w - #credit) / 2) + 1), h)
+  mon.write(credit)
+end
+
 local function drawMonitor()
   mon.setBackgroundColor(colors.black)
   mon.clear()
@@ -240,6 +320,8 @@ local function drawMonitor()
     drawAddPrompt()
   elseif mode == "confirm_clear" then
     drawConfirmClear()
+  elseif mode == "help" then
+    drawHelp()
   end
 end
 
@@ -275,7 +357,21 @@ end
 local function handleTouch(x, y)
   local w = mon.getSize()
 
+  -- Tap anywhere on the help screen to close it
+  if mode == "help" then
+    mode = "list"
+    drawMonitor()
+    return
+  end
+
   if mode == "list" then
+
+    -- [?] help button: bottom-right corner
+    if y == helpButtonRow and x >= helpButtonX then
+      mode = "help"
+      drawMonitor()
+      return
+    end
 
     -- Mode tag: toggle singleton on/off (only when a modem is attached)
     if modem and y == 1 and x >= modeTagX and x < modeTagX + modeTagLen then
@@ -342,7 +438,7 @@ local function touchLoop()
   while true do
     local _, side, x, y = os.pullEvent("monitor_touch")
     if side ~= monName then -- ignore events from other monitors
-    elseif mode == "list" or mode == "confirm_clear" then
+    elseif mode == "list" or mode == "confirm_clear" or mode == "help" then
       handleTouch(x, y)
       -- Mode tag tap sets restartRequested and returns from handleTouch;
       -- we catch it here to break out of the parallel cleanly.
