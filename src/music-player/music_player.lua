@@ -51,6 +51,24 @@ local function centerText(y, text, fg, bg)
   writeAt(x, y, text, fg, bg)
 end
 
+-- Split text at word boundaries so each line fits within maxWidth.
+local function wordWrap(text, maxWidth)
+  local lines = {}
+  local line = ""
+  for word in text:gmatch("%S+") do
+    if #line == 0 then
+      line = word
+    elseif #line + 1 + #word <= maxWidth then
+      line = line .. " " .. word
+    else
+      table.insert(lines, line)
+      line = word
+    end
+  end
+  if #line > 0 then table.insert(lines, line) end
+  return lines
+end
+
 -- Scan MUSIC_DIR for .dfpwm files, sorted alphabetically.
 local function scanTracks()
   local list = {}
@@ -97,7 +115,11 @@ local function drawUI()
   writeAt(1, 2, string.rep("-", w), COL_DIM, COL_BG)
 
   if showCredit then
-    centerText(math.floor(h / 2), "Created by xransum", COL_HEADER, COL_BG)
+    local lines = wordWrap("Created by xransum", w - 2)
+    local startRow = math.floor((h - #lines) / 2)
+    for i, line in ipairs(lines) do
+      centerText(startRow + i - 1, line, COL_HEADER, COL_BG)
+    end
   elseif #tracks == 0 then
     centerText(math.floor(h / 2),     "No tracks in /" .. MUSIC_DIR, COL_DIM, COL_BG)
     centerText(math.floor(h / 2) + 1, "Add .dfpwm files and reboot", COL_DIM, COL_BG)
