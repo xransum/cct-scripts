@@ -139,18 +139,19 @@ local function drawList()
   mon.setCursorPos(1, 1)
   mon.write("TO-DO LIST")
 
-  -- Mode tag, right-aligned on row 1, colored and tappable (when modem present)
-  local tag      = config.singleton and "[private]"
-                or (syncEnabled     and "[shared]"
-                                    or  "[offline]")
-  local tagColor = config.singleton and colors.orange
-                or (syncEnabled     and colors.lime
-                                    or  colors.gray)
-  modeTagX   = w - #tag + 1
-  modeTagLen = #tag
-  mon.setTextColor(tagColor)
-  mon.setCursorPos(modeTagX, 1)
-  mon.write(tag)
+  -- Mode tag only shown when a modem is present (something to actually toggle)
+  if modem then
+    local tag      = config.singleton and "[private]" or "[shared]"
+    local tagColor = config.singleton and colors.orange or colors.lime
+    modeTagX   = w - #tag + 1
+    modeTagLen = #tag
+    mon.setTextColor(tagColor)
+    mon.setCursorPos(modeTagX, 1)
+    mon.write(tag)
+  else
+    modeTagX   = w + 1   -- sentinel: tap check will never fire
+    modeTagLen = 0
+  end
 
   mon.setTextColor(colors.gray)
   mon.setCursorPos(1, 2)
@@ -282,13 +283,12 @@ local function drawHelp()
   mon.setCursorPos(1, 2)
   mon.write(string.rep("-", w))
 
-  -- Mode tags
+  -- Mode tags (only relevant when a modem is attached)
   put("[shared]",  colors.lime)
-  put("Syncs todos with other computers via rednet. Needs a wireless modem.", colors.white)
+  put("Syncs todos with nearby computers via rednet. Requires a modem.", colors.white)
   put("[private]", colors.orange)
-  put("Local list only. Sync disabled even with a modem.", colors.white)
-  put("[offline]", colors.gray)
-  put("No modem detected. Standalone only.", colors.white)
+  put("Local list only. Sync paused even when modem is present.", colors.white)
+  put("No mode tag? No modem — running standalone. All features still work.", colors.gray)
 
   -- Divider + controls
   if row <= h - 2 then
@@ -493,9 +493,9 @@ while true do
 
   term.clear()
   term.setCursorPos(1, 1)
-  local modeStr = config.singleton and "private (singleton)"
-               or (syncEnabled      and "shared (rednet)"
-                                    or  "offline (no modem)")
+  local modeStr = not modem        and "standalone"
+               or (config.singleton and "private"
+                                     or  "shared (rednet)")
   print("To-do list — " .. modeStr)
   if syncEnabled then print("Computer ID: " .. os.getComputerID()) end
   print("Monitor: " .. monName
