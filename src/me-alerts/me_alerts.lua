@@ -136,6 +136,7 @@ local itemRows      = {}   -- [row] = watchlist index
 local pickerRowMap  = {}   -- [row] = cachedItems index
 local addButtonRow, clearButtonRow
 local prevPageRow, nextPageRow, pickerCancelRow
+local pickerTotalPages = 1   -- saved by drawPicker so touch handler uses correct value
 local numpadGrid    = {}   -- [row][col] = button value string
 local numpadStartRow, numpadCancelRow
 local editRows      = {}   -- [row] = "threshold"|"delete"|"cancel"
@@ -301,6 +302,7 @@ local function drawPicker()
   if pageSize < 1 then pageSize = 1 end
 
   local totalPages = math.max(1, math.ceil(#cachedItems / pageSize))
+  pickerTotalPages = totalPages   -- save for touch handler
   if pickerPage > totalPages then pickerPage = totalPages end
   if pickerPage < 1          then pickerPage = 1          end
 
@@ -703,17 +705,21 @@ local function handleTouch(x, y)
   end
 
   if mode == "picker" then
-    if y == pickerCancelRow then
-      local cancelX = math.floor((mon.getSize() - 6) / 2) + 1
-      mode = "list"; drawMonitor(); return
-    end
-    if y == prevPageRow and x <= 8 then
-      if pickerPage > 1 then pickerPage = pickerPage - 1; drawMonitor() end
-      return
-    end
-    if y == nextPageRow and x >= (w - 7) then
-      local totalPages = math.max(1, math.ceil(#cachedItems / (mon.getSize() - 5 - 1)))
-      if pickerPage < totalPages then pickerPage = pickerPage + 1; drawMonitor() end
+    -- All three buttons share the same bottom row (h).
+    -- Distinguish them by x position: PREV is left, NEXT is right, CANCEL is centre.
+    if y == prevPageRow then
+      local prevText = "< PREV"
+      local nextText = "NEXT >"
+      if x >= 2 and x <= 2 + #prevText - 1 then
+        -- PREV
+        if pickerPage > 1 then pickerPage = pickerPage - 1; drawMonitor() end
+      elseif x >= w - #nextText then
+        -- NEXT
+        if pickerPage < pickerTotalPages then pickerPage = pickerPage + 1; drawMonitor() end
+      else
+        -- CANCEL (middle of the row)
+        mode = "list"; drawMonitor()
+      end
       return
     end
     local cidx = pickerRowMap[y]
