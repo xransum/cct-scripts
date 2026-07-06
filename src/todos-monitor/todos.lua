@@ -68,6 +68,7 @@ if not mon then
 end
 
 mon.setTextScale(0.5)
+local monName = peripheral.getName(mon)   -- used to filter monitor_touch events
 
 local speaker = peripheral.find("speaker")
 local modem   = peripheral.find("modem")
@@ -339,8 +340,9 @@ end
 
 local function touchLoop()
   while true do
-    local _, _, x, y = os.pullEvent("monitor_touch")
-    if mode == "list" or mode == "confirm_clear" then
+    local _, side, x, y = os.pullEvent("monitor_touch")
+    if side ~= monName then -- ignore events from other monitors
+    elseif mode == "list" or mode == "confirm_clear" then
       handleTouch(x, y)
       -- Mode tag tap sets restartRequested and returns from handleTouch;
       -- we catch it here to break out of the parallel cleanly.
@@ -400,10 +402,19 @@ while true do
                                     or  "offline (no modem)")
   print("To-do list — " .. modeStr)
   if syncEnabled then print("Computer ID: " .. os.getComputerID()) end
+  print("Monitor: " .. monName
+        .. " | Modem: " .. (modem and peripheral.getName(modem) or "NONE")
+        .. " | Speaker: " .. (speaker and "ok" or "none"))
   print("Tap the mode tag on the monitor to toggle. Type here to add items.")
 
   if syncEnabled then
-    parallel.waitForAny(touchLoop, syncLoop)
+    local ok, err = pcall(parallel.waitForAny, touchLoop, syncLoop)
+    if not ok and not restartRequested then
+      printError("Sync error: " .. tostring(err))
+      print("Restarting in 3 seconds...")
+      sleep(3)
+      restartRequested = true   -- loop back instead of exiting
+    end
   else
     touchLoop()
   end
