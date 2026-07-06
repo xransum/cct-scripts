@@ -77,8 +77,8 @@ local modem   = peripheral.find("modem")
 local syncEnabled = false
 
 local function playSound(instrument, pitch, volume)
-  if speaker then
-    speaker.playNote(instrument, volume or 1, pitch or 12)
+  if speaker and instrument ~= nil then
+    pcall(speaker.playNote, instrument, volume or 1, pitch or 12)
   end
 end
 
@@ -281,7 +281,7 @@ local function handleTouch(x, y)
       config.singleton = not config.singleton
       saveTable(CONFIG_FILE, config)
       restartRequested = true
-      playSound("click" or "hat", 12, 1)
+      playSound("hat", 12, 1)
       return
     end
 
