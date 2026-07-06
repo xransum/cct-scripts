@@ -99,20 +99,31 @@ end
 
 -- ── todos state ──────────────────────────────────────────────────────────────
 
-local todos = {}
+local todos        = {}
+local lastModified = 0   -- os.epoch("utc") of last local write; used for sync conflict resolution
 
 local function loadTodos()
-  todos = loadTable(SAVE_FILE, {})
+  local data = loadTable(SAVE_FILE, {})
+  if type(data.todos) == "table" then
+    -- new format: { todos = {...}, lastModified = N }
+    todos        = data.todos
+    lastModified = data.lastModified or os.epoch("utc")
+  else
+    -- old format: plain array  { {text=..., done=...}, ... }
+    todos        = data
+    lastModified = os.epoch("utc")   -- treat as freshly modified so it wins any incoming sync
+  end
 end
 
 local function saveTodos()
-  saveTable(SAVE_FILE, todos)
+  lastModified = os.epoch("utc")
+  saveTable(SAVE_FILE, { todos = todos, lastModified = lastModified })
 end
 
 local function broadcast()
   if syncEnabled then
     rednet.broadcast(
-      { type = "sync", todos = todos, sender = os.getComputerID() },
+      { type = "sync", todos = todos, lastModified = lastModified, sender = os.getComputerID() },
       SYNC_PROTO
     )
   end
@@ -454,16 +465,14 @@ local function syncLoop()
     local _, msg = rednet.receive(SYNC_PROTO)
     if type(msg) == "table" and msg.sender ~= os.getComputerID() then
       if msg.type == "sync" then
-        todos = msg.todos
-        saveTodos()
-        if mode ~= "add_prompt" then
-          drawMonitor()
+        if (msg.lastModified or 0) > lastModified then
+          todos        = msg.todos or {}
+          lastModified = msg.lastModified
+          saveTable(SAVE_FILE, { todos = todos, lastModified = lastModified })
+          if mode ~= "add_prompt" then drawMonitor() end
         end
       elseif msg.type == "hello" then
-        rednet.broadcast(
-          { type = "sync", todos = todos, sender = os.getComputerID() },
-          SYNC_PROTO
-        )
+        broadcast()
       end
     end
   end
