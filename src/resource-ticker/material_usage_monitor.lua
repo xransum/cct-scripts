@@ -173,6 +173,7 @@ if persisted.snapshot then
 end
 
 local topMovers = {}
+local nextScanAt = 0  -- epoch seconds when the next auto-scan fires
 
 local function safeCall(fn, ...)
   if not fn then return nil end
@@ -264,9 +265,27 @@ local function drawAlertBanner(row)
   return row + 1
 end
 
+-- Writes a right-aligned next-scan countdown flush to the top-right corner
+-- of row 1. All draw functions call this immediately after the header write.
+local function drawCountdown()
+  local label
+  if not autoscan.enabled or nextScanAt == 0 then
+    label = "  --"
+  else
+    local secsLeft = math.max(0, math.floor(nextScanAt - os.epoch("utc") / 1000))
+    if secsLeft >= 1000 then
+      label = "999+"
+    else
+      label = string.format("%3ds", secsLeft)
+    end
+  end
+  writeAt(w - 3, 1, label, COL_FLAT, COL_BG)
+end
+
 local function drawDashboard()
   clear()
   writeAt(1, 1, "MATERIAL USAGE TICKER", COL_HEADER, COL_BG)
+  drawCountdown()
   drawButtons()
   local row = 2
   row = drawAlertBanner(row)
@@ -292,6 +311,7 @@ end
 local function drawHelp()
   clear()
   writeAt(1, 1, "HELP", COL_HEADER, COL_BG)
+  drawCountdown()
   drawButtons()
   local row = 2
   row = drawAlertBanner(row)
@@ -333,6 +353,7 @@ end
 local function drawAddInfo()
   clear()
   writeAt(1, 1, "ADD ITEM", COL_HEADER, COL_BG)
+  drawCountdown()
   drawButtons()
   local row = 2
   row = drawAlertBanner(row)
@@ -366,6 +387,7 @@ end
 local function drawAllItems()
   clear()
   writeAt(1, 1, "TOP MOVERS (ALL ITEMS)", COL_HEADER, COL_BG)
+  drawCountdown()
   drawButtons()
   local row = 2
   row = drawAlertBanner(row)
@@ -523,6 +545,7 @@ local function autoScanLoop()
       end
       savePersistedState(watchlistSnapshot, snapshot)
 
+      nextScanAt = os.epoch("utc") / 1000 + autoscan.scanInterval
       sleep(autoscan.scanInterval)
     end
   end
@@ -550,4 +573,14 @@ local function touchLoop()
 end
 
 render()
-parallel.waitForAny(pollLoop, autoScanLoop, touchLoop)
+
+-- Ticks once per real second to keep the scan countdown current without
+-- triggering a full screen redraw.
+local function countdownLoop()
+  while true do
+    sleep(1)
+    pcall(drawCountdown)
+  end
+end
+
+parallel.waitForAny(pollLoop, autoScanLoop, touchLoop, countdownLoop)
