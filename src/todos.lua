@@ -4,16 +4,19 @@
 -- A computer with a wired or wireless modem joins the shared pool; without
 -- a modem, or with singleton mode set, it manages its own private list.
 --
--- Usage:
---   todos              run with current mode
+-- Touch the [shared] / [private] tag on the top-right of the monitor to
+-- toggle singleton mode on the fly without restarting the script.
+--
+-- CLI shortcuts (optional):
 --   todos singleton    switch this computer to private mode, then run
 --   todos shared       switch this computer back to shared mode, then run
 --
 -- Touch controls (right click the monitor):
---   Tap an item line   -> toggle done / not done
---   Tap [X] on a line  -> delete that item
---   Tap ADD ITEM       -> switch to add mode; type on the computer terminal
---   Tap CLEAR ALL      -> clears everything (confirmation if > threshold)
+--   Tap [shared]/[private]  -> toggle singleton mode
+--   Tap an item line         -> toggle done / not done
+--   Tap [X] on a line        -> delete that item
+--   Tap ADD ITEM             -> switch to add mode; type on the computer terminal
+--   Tap CLEAR ALL            -> clears everything (confirmation if > threshold)
 
 local SAVE_FILE         = "todos.txt"
 local CONFIG_FILE       = "todos_config.cfg"
@@ -69,11 +72,9 @@ mon.setTextScale(0.5)
 local speaker = peripheral.find("speaker")
 local modem   = peripheral.find("modem")
 
--- Sync is active when: not in singleton mode AND a modem is present.
-local syncEnabled = modem ~= nil and not config.singleton
-if syncEnabled then
-  rednet.open(peripheral.getName(modem))
-end
+-- syncEnabled is a module-level upvalue so broadcast() and syncLoop() always
+-- read the current value after a mode toggle re-initialises it.
+local syncEnabled = false
 
 local function playSound(instrument, pitch, volume)
   if speaker then
@@ -93,7 +94,6 @@ local function saveTodos()
   saveTable(SAVE_FILE, todos)
 end
 
--- Broadcast the full list to all peers. No-op when sync is off.
 local function broadcast()
   if syncEnabled then
     rednet.broadcast(
@@ -108,7 +108,9 @@ end
 local itemRows = {}
 local addButtonRow, clearButtonRow
 local yesButtonRow, noButtonRow, yesButtonCol, noButtonCol
-local mode = "list"  -- "list" | "add_prompt" | "confirm_clear"
+local modeTagX, modeTagLen   -- position of the tappable mode tag on row 1
+local mode            = "list"
+local restartRequested = false
 
 -- ── drawing ──────────────────────────────────────────────────────────────────
 
@@ -116,12 +118,23 @@ local function drawList()
   local w, h = mon.getSize()
   itemRows = {}
 
-  -- Title: shows sync mode
-  local tag   = config.singleton and " [private]" or (syncEnabled and " [shared]" or " [offline]")
-  local title = "TO-DO LIST" .. tag
+  -- Title, left-center
   mon.setTextColor(colors.yellow)
-  mon.setCursorPos(math.max(1, math.floor((w - #title) / 2) + 1), 1)
-  mon.write(title)
+  mon.setCursorPos(1, 1)
+  mon.write("TO-DO LIST")
+
+  -- Mode tag, right-aligned on row 1, colored and tappable (when modem present)
+  local tag      = config.singleton and "[private]"
+                or (syncEnabled     and "[shared]"
+                                    or  "[offline]")
+  local tagColor = config.singleton and colors.orange
+                or (syncEnabled     and colors.lime
+                                    or  colors.gray)
+  modeTagX   = w - #tag + 1
+  modeTagLen = #tag
+  mon.setTextColor(tagColor)
+  mon.setCursorPos(modeTagX, 1)
+  mon.write(tag)
 
   mon.setTextColor(colors.gray)
   mon.setCursorPos(1, 2)
@@ -262,6 +275,16 @@ local function handleTouch(x, y)
   local w = mon.getSize()
 
   if mode == "list" then
+
+    -- Mode tag: toggle singleton on/off (only when a modem is attached)
+    if modem and y == 1 and x >= modeTagX and x < modeTagX + modeTagLen then
+      config.singleton = not config.singleton
+      saveTable(CONFIG_FILE, config)
+      restartRequested = true
+      playSound("click" or "hat", 12, 1)
+      return
+    end
+
     if y == addButtonRow and x >= 2 and x <= 13 then
       mode = "add_prompt"
       drawMonitor()
@@ -319,20 +342,14 @@ local function touchLoop()
     local _, _, x, y = os.pullEvent("monitor_touch")
     if mode == "list" or mode == "confirm_clear" then
       handleTouch(x, y)
+      -- Mode tag tap sets restartRequested and returns from handleTouch;
+      -- we catch it here to break out of the parallel cleanly.
+      if restartRequested then return end
     end
-    -- touches during add_prompt are ignored; typing happens on the terminal
   end
 end
 
--- Receives incoming syncs from peer computers.
---
--- "sync"  → replace local list with the received one and redraw.
--- "hello" → a peer just started up; reply with our current list so it
---           bootstraps to the shared state without waiting for the next edit.
---
--- We filter our own broadcasts by comparing sender to os.getComputerID().
 local function syncLoop()
-  -- Announce ourselves so any running peers send us their current list.
   rednet.broadcast({ type = "hello", sender = os.getComputerID() }, SYNC_PROTO)
 
   while true do
@@ -341,13 +358,10 @@ local function syncLoop()
       if msg.type == "sync" then
         todos = msg.todos
         saveTodos()
-        -- Don't interrupt an in-progress add; the user will see the updated
-        -- list as soon as they submit or cancel.
         if mode ~= "add_prompt" then
           drawMonitor()
         end
       elseif msg.type == "hello" then
-        -- Share our current list with the new peer.
         rednet.broadcast(
           { type = "sync", todos = todos, sender = os.getComputerID() },
           SYNC_PROTO
@@ -360,21 +374,43 @@ end
 -- ── startup ──────────────────────────────────────────────────────────────────
 
 loadTodos()
-drawMonitor()
 
-term.clear()
-term.setCursorPos(1, 1)
-local modeStr = config.singleton and "private (singleton)"
-             or (syncEnabled      and "shared (rednet)"
-                                  or  "offline (no modem)")
-print("To-do list — " .. modeStr)
-if syncEnabled then
-  print("Computer ID: " .. os.getComputerID())
-end
-print("Tap ADD ITEM on the monitor, then type here when prompted.")
+while true do
+  restartRequested = false
 
-if syncEnabled then
-  parallel.waitForAny(touchLoop, syncLoop)
-else
-  touchLoop()
+  -- Open or close the modem to match the current config.
+  if modem then
+    local modemName = peripheral.getName(modem)
+    if config.singleton then
+      if rednet.isOpen(modemName) then rednet.close(modemName) end
+    else
+      if not rednet.isOpen(modemName) then rednet.open(modemName) end
+    end
+  end
+
+  -- Recompute syncEnabled so broadcast() and syncLoop() see the new value.
+  syncEnabled = modem ~= nil and not config.singleton
+
+  drawMonitor()
+
+  term.clear()
+  term.setCursorPos(1, 1)
+  local modeStr = config.singleton and "private (singleton)"
+               or (syncEnabled      and "shared (rednet)"
+                                    or  "offline (no modem)")
+  print("To-do list — " .. modeStr)
+  if syncEnabled then print("Computer ID: " .. os.getComputerID()) end
+  print("Tap the mode tag on the monitor to toggle. Type here to add items.")
+
+  if syncEnabled then
+    parallel.waitForAny(touchLoop, syncLoop)
+  else
+    touchLoop()
+  end
+
+  -- Only loop back if the user tapped the mode toggle; any other exit is final.
+  if not restartRequested then break end
+
+  -- Reload config (was saved by the toggle handler before restartRequested was set).
+  config = loadTable(CONFIG_FILE, { singleton = false })
 end
