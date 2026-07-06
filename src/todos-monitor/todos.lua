@@ -85,7 +85,7 @@ mon.setTextScale(0.5)
 local monName = peripheral.getName(mon)   -- used to filter monitor_touch events
 
 local speaker = peripheral.find("speaker")
-local modem   = peripheral.find("modem")
+local modem   = peripheral.find("modem", function(_, m) return m.isWireless() end)
 
 -- syncEnabled is a module-level upvalue so broadcast() and syncLoop() always
 -- read the current value after a mode toggle re-initialises it.
