@@ -245,7 +245,7 @@ local function drawConfirmClear()
 
   mon.setTextColor(colors.red)
   local msg = "Clear ALL " .. #todos .. " items?"
-  mon.setCursorPos(math.floor((w - #msg) / 2) + 1, midH - 1)
+  mon.setCursorPos(math.max(1, math.floor((w - #msg) / 2) + 1), midH - 1)
   mon.write(msg)
 
   if syncEnabled then
@@ -255,19 +255,22 @@ local function drawConfirmClear()
     mon.write(warn)
   end
 
-  local row = midH + 1
+  local btnY = midH + (syncEnabled and 2 or 1)
+
+  local yesText = "[ YES, CLEAR ]"
   mon.setBackgroundColor(colors.green)
   mon.setTextColor(colors.white)
-  yesButtonCol = math.floor(w / 2) - 8
-  mon.setCursorPos(yesButtonCol, row)
-  mon.write(" YES, CLEAR ")
-  yesButtonRow = row
+  yesButtonRow = btnY
+  yesButtonCol = math.max(1, math.floor((w - #yesText) / 2) + 1)
+  mon.setCursorPos(yesButtonCol, yesButtonRow)
+  mon.write(yesText)
 
+  local noText  = "[   CANCEL   ]"
   mon.setBackgroundColor(colors.gray)
-  noButtonCol = math.floor(w / 2) + 2
-  mon.setCursorPos(noButtonCol, row)
-  mon.write("   CANCEL   ")
-  noButtonRow = row
+  noButtonRow = btnY + 1
+  noButtonCol = math.max(1, math.floor((w - #noText) / 2) + 1)
+  mon.setCursorPos(noButtonCol, noButtonRow)
+  mon.write(noText)
 
   mon.setBackgroundColor(colors.black)
 end
@@ -440,9 +443,10 @@ local function handleTouch(x, y)
     end
 
   elseif mode == "confirm_clear" then
-    if y == yesButtonRow and x >= yesButtonCol and x < yesButtonCol + 12 then
+    -- Full-row touch detection: each button owns its entire row so no clipping on narrow monitors
+    if y == yesButtonRow then
       clearAll()
-    elseif y == noButtonRow and x >= noButtonCol and x < noButtonCol + 12 then
+    elseif y == noButtonRow then
       mode = "list"
       drawMonitor()
       playSound("hat", 6, 1)
