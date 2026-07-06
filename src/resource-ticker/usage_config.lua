@@ -18,6 +18,7 @@ local DEFAULT_AUTOSCAN = {
   minQuantity = 1000,
   depletionPercentPerMin = 15,
   scanInterval = 30,
+  topN = 999,
 }
 
 local function saveTable(path, data)
@@ -262,6 +263,7 @@ local function printAutoscan()
   print("Min quantity tracked: " .. cfg.minQuantity)
   print("Depletion alarm threshold: " .. cfg.depletionPercentPerMin .. "%/min")
   print("Scan interval: " .. cfg.scanInterval .. "s")
+  print("Top movers shown: " .. (cfg.topN or 999))
 end
 
 local function autoscanCommand(args)
@@ -303,6 +305,15 @@ local function autoscanCommand(args)
     cfg.scanInterval = math.floor(value)
     saveAutoscan(cfg)
     print("Scan interval set to " .. cfg.scanInterval .. "s")
+  elseif sub == "topn" then
+    local ok, value = validNumber(args[2], 1)
+    if not ok then
+      print("Invalid top N: " .. value)
+      return
+    end
+    cfg.topN = math.floor(value)
+    saveAutoscan(cfg)
+    print("Top movers count set to " .. cfg.topN)
   else
     printAutoscan()
     print("")
@@ -312,6 +323,7 @@ local function autoscanCommand(args)
     print("  usage_config autoscan minqty 1000")
     print("  usage_config autoscan percent 15")
     print("  usage_config autoscan interval 30")
+    print("  usage_config autoscan topn 8   (cap the list, default fills screen)")
   end
 end
 
