@@ -107,7 +107,7 @@ local function drawStorageTall(data, row)
 
   -- ITEMS
   if row <= h then
-    mon.setTextColor(colors.aqua)
+    mon.setTextColor(colors.cyan)
     mon.setCursorPos(1, row); mon.write("ITEMS")
     row = row + 1
   end
@@ -130,7 +130,7 @@ local function drawStorageTall(data, row)
 
   -- FLUIDS
   if row <= h then
-    mon.setTextColor(colors.aqua)
+    mon.setTextColor(colors.cyan)
     mon.setCursorPos(1, row); mon.write("FLUIDS")
     row = row + 1
   end
@@ -164,7 +164,7 @@ local function drawPowerTall(data, row)
 
   -- STORED
   if row <= h then
-    mon.setTextColor(colors.aqua)
+    mon.setTextColor(colors.cyan)
     mon.setCursorPos(1, row); mon.write("STORED")
     row = row + 1
   end
@@ -188,7 +188,7 @@ local function drawPowerTall(data, row)
   -- USAGE
   if data.energyUsage then
     if row <= h then
-      mon.setTextColor(colors.aqua)
+      mon.setTextColor(colors.cyan)
       mon.setCursorPos(1, row); mon.write("USAGE")
       row = row + 1
     end
@@ -236,7 +236,7 @@ local function draw(data)
 
   else
     -- Combined: compact inline bars for both sections
-    mon.setTextColor(colors.aqua); mon.setCursorPos(1, row); mon.write("STORAGE"); row = row + 1
+    mon.setTextColor(colors.cyan); mon.setCursorPos(1, row); mon.write("STORAGE"); row = row + 1
 
     if data.itemTotal then
       inlineBar(row, "Items  ", data.itemUsed, data.itemTotal, BAR_W, colors.green); row = row + 1
@@ -259,7 +259,7 @@ local function draw(data)
     end
 
     sep()
-    mon.setTextColor(colors.aqua); mon.setCursorPos(1, row); mon.write("POWER"); row = row + 1
+    mon.setTextColor(colors.cyan); mon.setCursorPos(1, row); mon.write("POWER"); row = row + 1
 
     if data.energyMax then
       inlineBar(row, "Stored ", data.energyStored, data.energyMax, BAR_W, colors.yellow); row = row + 1
