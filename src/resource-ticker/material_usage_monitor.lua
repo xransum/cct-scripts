@@ -135,6 +135,24 @@ local function writeAt(x, y, text, fg, bg)
   mon.write(text)
 end
 
+-- wordWrap(text, maxWidth) -> list of display lines split at word boundaries
+local function wordWrap(text, maxWidth)
+  local lines = {}
+  local line = ""
+  for word in text:gmatch("%S+") do
+    if #line == 0 then
+      line = word
+    elseif #line + 1 + #word <= maxWidth then
+      line = line .. " " .. word
+    else
+      table.insert(lines, line)
+      line = word
+    end
+  end
+  if #line > 0 then table.insert(lines, line) end
+  return lines
+end
+
 local watchlist = loadWatchlist()
 local autoscan = loadAutoscan()
 local persisted = loadPersistedState()
@@ -318,35 +336,30 @@ local function drawHelp()
   writeAt(1, row, string.rep("-", w))
   row = row + 1
 
-  local lines = {
-    "UP/DOWN/-- show whether a",
-    "watched item is trending",
-    "past its own threshold.",
-    "",
-    "Priority sets display",
-    "order, 1 shows first.",
-    "",
-    "The red banner is the",
-    "auto depletion alarm. It",
-    "watches your whole ME",
-    "network for big stacks",
-    "draining fast, no manual",
-    "watchlist entry needed.",
-    "",
-    "Tap all for a top movers",
-    "view across every item,",
-    "built from the same scan",
-    "the alarm already runs.",
-    "",
-    "Tap + to add a watchlist",
-    "item from the computer.",
-    "Tap help again for ticker.",
+  local paragraphs = {
+    "UP/DOWN/-- shows whether a watched item is trending past its threshold.",
+    "Priority sets display order; 1 shows first.",
+    "The red banner is the auto depletion alarm. It watches your whole ME network for large stacks draining fast with no manual watchlist entry needed.",
+    "Tap [all] for a top movers view across every item, built from the same scan the alarm already runs.",
+    "Tap [+ add] for instructions on adding a watchlist item from the computer.",
+    "Tap [? help] again to return to the ticker.",
   }
 
-  for _, line in ipairs(lines) do
-    writeAt(1, row, line, COL_TEXT, COL_BG)
-    row = row + 1
+  local wrapWidth = w - 1
+  for i, para in ipairs(paragraphs) do
     if row > h - 1 then break end
+    for _, line in ipairs(wordWrap(para, wrapWidth)) do
+      writeAt(1, row, line, COL_TEXT, COL_BG)
+      row = row + 1
+      if row > h - 1 then break end
+    end
+    if i < #paragraphs and row <= h - 1 then
+      row = row + 1
+    end
+  end
+
+  if row <= h - 1 then
+    writeAt(1, row, "-- github.com/xransum", COL_FLAT, COL_BG)
   end
 end
 
