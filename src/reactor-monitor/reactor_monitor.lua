@@ -560,12 +560,32 @@ local function drawDashboard(mon, monName, startRow)
   end
   row = row + 1
 
-  -- Footer credit
-  if at(h) then
-    local credit = "-- github.com/xransum"
-    mon.setTextColor(colors.gray)
-    mon.setCursorPos(math.max(1, math.floor((w - #credit)/2)+1), h)
-    mon.write(credit:sub(1, w))
+  -- Auto banner + footer credit
+  if cfg.autoMode then
+    -- Two-line footer: banner on h-1, credit on h (if room), else just banner on h
+    local banner = "* Auto mode: rods adjust to match target FE/t"
+    if h - row >= 2 then
+      -- banner on h-1
+      mon.setTextColor(colors.gray)
+      mon.setCursorPos(1, h - 1)
+      mon.write(banner:sub(1, w))
+      -- credit on h
+      local credit = "-- github.com/xransum"
+      mon.setCursorPos(math.max(1, math.floor((w - #credit)/2)+1), h)
+      mon.write(credit:sub(1, w))
+    elseif at(h) then
+      -- only room for one line — show banner
+      mon.setTextColor(colors.gray)
+      mon.setCursorPos(1, h)
+      mon.write(banner:sub(1, w))
+    end
+  else
+    if at(h) then
+      local credit = "-- github.com/xransum"
+      mon.setTextColor(colors.gray)
+      mon.setCursorPos(math.max(1, math.floor((w - #credit)/2)+1), h)
+      mon.write(credit:sub(1, w))
+    end
   end
 end
 

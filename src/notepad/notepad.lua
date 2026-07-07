@@ -102,10 +102,10 @@ local function addTopic(name)
   local f = fs.open(topicPath(name), "w")
   f.write("")
   f.close()
-  topics[#topics + 1] = name
-  table.sort(topics)
+  topics[#topics + 1] = name   -- append so new tabs appear on the right
   currentTopic = name
   scrollOffsets[name] = 0
+  tabOffset = #topics           -- scroll tab strip to show the new tab
 end
 
 local function deleteTopic(name)
