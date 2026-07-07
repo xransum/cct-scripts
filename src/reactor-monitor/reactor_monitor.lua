@@ -104,7 +104,7 @@ local function bar(filled, total, width)
 end
 
 local function pct(a, b)
-  if b == 0 then return 0 end
+  if type(a) ~= "number" or type(b) ~= "number" or b == 0 then return 0 end
   return math.floor(a / b * 100)
 end
 
@@ -149,28 +149,42 @@ end
 local state = {}
 
 local function pollReactor()
+  -- Helper: call a reactor method, return number or fallback
+  local function rnum(fn, fallback)
+    local ok, v = pcall(fn)
+    if ok and type(v) == "number" then return v end
+    return fallback or 0
+  end
+  local function rbool(fn, fallback)
+    local ok, v = pcall(fn)
+    if ok and type(v) == "boolean" then return v end
+    return fallback or false
+  end
+
   local ok, err = pcall(function()
-    state.active         = reactor.getActive()
-    state.fuelTemp       = reactor.getFuelTemperature()
-    state.casingTemp     = reactor.getCasingTemperature()
-    state.fuelAmt        = reactor.getFuelAmount()
-    state.fuelMax        = reactor.getFuelAmountMax()
-    state.wasteAmt       = reactor.getWasteAmount()
-    state.energyStored   = reactor.getEnergyStored()
-    state.energyCap      = reactor.getEnergyCapacity()
-    state.reactivity     = reactor.getFuelReactivity()
-    state.fuelConsumed   = reactor.getFuelConsumedLastTick()
-    state.rodCount       = reactor.getNumberOfControlRods()
-    state.activeCooled   = reactor.isActivelyCooled()
+    state.active         = rbool(reactor.getActive, false)
+    state.fuelTemp       = rnum(reactor.getFuelTemperature)
+    state.casingTemp     = rnum(reactor.getCasingTemperature)
+    state.fuelAmt        = rnum(reactor.getFuelAmount)
+    state.fuelMax        = rnum(reactor.getFuelAmountMax, 1)
+    state.wasteAmt       = rnum(reactor.getWasteAmount)
+    state.energyStored   = rnum(reactor.getEnergyStored)
+    state.energyCap      = rnum(reactor.getEnergyCapacity, 1)
+    state.reactivity     = rnum(reactor.getFuelReactivity)
+    state.fuelConsumed   = rnum(reactor.getFuelConsumedLastTick)
+    state.rodCount       = rnum(reactor.getNumberOfControlRods, 0)
+    state.activeCooled   = rbool(reactor.isActivelyCooled, false)
     if state.activeCooled then
-      state.energyLastTick = reactor.getHotFluidProducedLastTick()
+      state.energyLastTick = rnum(reactor.getHotFluidProducedLastTick)
     else
-      state.energyLastTick = reactor.getEnergyProducedLastTick()
+      state.energyLastTick = rnum(reactor.getEnergyProducedLastTick)
     end
     -- Rod levels
     state.rodLevels = state.rodLevels or {}
-    for i = 0, state.rodCount - 1 do
-      state.rodLevels[i] = reactor.getControlRodLevel(i)
+    local count = math.floor(state.rodCount)
+    for i = 0, count - 1 do
+      local ok2, v = pcall(reactor.getControlRodLevel, i)
+      state.rodLevels[i] = (ok2 and type(v) == "number") and v or 0
     end
   end)
   if not ok then
