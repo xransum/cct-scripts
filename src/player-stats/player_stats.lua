@@ -359,7 +359,7 @@ local function drawRoster()
     -- Row 2: [health bar]  hp  deaths  total
     drawHealthBar(row, 2, BAR_W, health, maxHP)
     local hpStr    = ("  %d/%d hp"):format(math.floor(health), math.floor(maxHP))
-    local deathStr = tostring(p.deaths) .. "d"
+    local deathStr = "(" .. tostring(p.deaths) .. ")"
     local right2   = deathStr .. "  " .. totStr
     mon.setTextColor(colors.white)
     mon.setCursorPos(2 + BAR_W, row)
@@ -389,7 +389,7 @@ local function drawRoster()
 
     local agoStr   = fmtDuration(now - p.lastSeen) .. " ago"
     local totStr   = fmtDuration(p.totalMs)
-    local deathStr = tostring(p.deaths) .. "d"
+    local deathStr = "(" .. tostring(p.deaths) .. ")"
     local right1   = agoStr .. "  " .. deathStr .. "  " .. totStr
     local nameMax  = w - 2 - #right1 - 1
 
@@ -470,7 +470,7 @@ local function drawStats()
       mon.write(p.isOnline and "+" or " ")
 
       -- Deaths
-      local deathStr = tostring(p.deaths) .. "d"
+      local deathStr = "(" .. tostring(p.deaths) .. ")"
       -- Time
       local timeStr  = fmtDuration(p.totalMs)
       -- Name (fills remaining space)
@@ -493,7 +493,7 @@ local function drawStats()
 
   -- Footer
   if h >= row then
-    local note = "+ = online  deaths since deploy"
+    local note = "+ = online  all-time playtime"
     mon.setTextColor(colors.gray)
     mon.setCursorPos(1, h)
     mon.write(truncate(note, w))
