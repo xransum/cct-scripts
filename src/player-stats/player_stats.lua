@@ -297,6 +297,18 @@ local function drawHealthBar(row, col, barW, health, maxHealth)
   mon.setBackgroundColor(colors.black)
 end
 
+-- Write a row of color-coded text segments: { {text, color}, ... }
+local function legendLine(w, y, segments)
+  local x = 1
+  for _, seg in ipairs(segments) do
+    if x > w then break end
+    mon.setTextColor(seg[2])
+    mon.setCursorPos(x, y)
+    mon.write(seg[1]:sub(1, w - x + 1))
+    x = x + #seg[1]
+  end
+end
+
 local function drawRoster()
   local w, h = mon.getSize()
   local BAR_W = math.max(6, math.floor(w * 0.28))
@@ -410,10 +422,16 @@ local function drawRoster()
     mon.setCursorPos(2, row); mon.write("No players seen yet.")
   end
 
-  -- ── footer ─────────────────────────────────────────────────────────────────
-  local note = chatBox and "death: chat+health" or "death: health poll"
-  mon.setTextColor(colors.gray)
-  mon.setCursorPos(w - #note + 1, h); mon.write(note)
+  -- ── footer legend ─────────────────────────────────────────────────────────
+  legendLine(w, h, {
+    {"+", colors.lime},    {" online", colors.gray},
+    {"  |  ",              colors.gray},
+    {"(N)", colors.red},   {" deaths", colors.gray},
+    {"  |  ",              colors.gray},
+    {"session",            colors.gray},
+    {"  ",                 colors.gray},
+    {"total",              colors.cyan},
+  })
 end
 
 local function drawStats()
@@ -491,12 +509,15 @@ local function drawStats()
     end
   end
 
-  -- Footer
+  -- Footer legend
   if h >= row then
-    local note = "+ = online  all-time playtime"
-    mon.setTextColor(colors.gray)
-    mon.setCursorPos(1, h)
-    mon.write(truncate(note, w))
+    legendLine(w, h, {
+      {"+", colors.lime},    {" online", colors.gray},
+      {"  |  ",              colors.gray},
+      {"(N)", colors.red},   {" deaths", colors.gray},
+      {"  |  ",              colors.gray},
+      {"all-time",           colors.cyan},
+    })
   end
 end
 
