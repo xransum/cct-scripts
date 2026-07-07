@@ -114,8 +114,8 @@ local mode = "list"
 -- "list" | "picker" | "numpad" | "edit_menu" | "confirm_del" | "help"
 
 -- Picker
-local pickerPage  = 1
-local pickerRows  = {}   -- [screenRow] = cachedItems index
+local pickerPage   = 1
+local pickerFilter = ""   -- lowercase search term; "" = show all
 
 -- Numpad
 local numpadStr     = ""      -- digits typed so far
@@ -133,7 +133,7 @@ local anyAlerting = false
 
 -- Row hit-detection tables (repopulated on each draw)
 local itemRows      = {}   -- [row] = watchlist index
-local pickerRowMap  = {}   -- [row] = cachedItems index
+local pickerRowMap  = {}   -- [row] = item object (from filtered list)
 local addButtonRow, clearButtonRow
 local prevPageRow, nextPageRow, pickerCancelRow
 local pickerTotalPages = 1   -- saved by drawPicker so touch handler uses correct value
@@ -161,13 +161,31 @@ local function refreshCache()
            or safeCall(bridge.items)
   if not raw then cachedItems = {}; return end
 
-  cachedItems = {}
+  -- Aggregate by item.name (mod:id) so that NBT variants of the same item
+  -- (enchanted tools, items with custom data, etc.) collapse into one row
+  -- with their counts summed.
+  local byName = {}
   for _, item in ipairs(raw) do
     local name  = item.name  or item.id or ""
     local label = item.displayName or item.label or name
     local count = item.amount or item.count or item.qty or 0
     if name ~= "" then
-      cachedItems[#cachedItems + 1] = { name = name, label = label, count = count }
+      if byName[name] then
+        byName[name].count = byName[name].count + count
+      else
+        byName[name] = { name = name, label = label, count = count }
+      end
+    end
+  end
+
+  -- Build sorted array, skipping items already on the watchlist
+  local inWatchlist = {}
+  for _, w in ipairs(watchlist) do inWatchlist[w.name] = true end
+
+  cachedItems = {}
+  for _, item in pairs(byName) do
+    if not inWatchlist[item.name] then
+      cachedItems[#cachedItems + 1] = item
     end
   end
   table.sort(cachedItems, function(a, b)
@@ -297,21 +315,39 @@ local function drawPicker()
   local w, h = mon.getSize()
   pickerRowMap = {}
 
+  -- Apply search filter
+  local filtered = {}
+  if pickerFilter == "" then
+    filtered = cachedItems
+  else
+    for _, item in ipairs(cachedItems) do
+      if item.label:lower():find(pickerFilter, 1, true) then
+        filtered[#filtered + 1] = item
+      end
+    end
+  end
+
   -- How many items fit between header (3 rows) and footer (2 rows)
   local pageSize = h - 5
   if pageSize < 1 then pageSize = 1 end
 
-  local totalPages = math.max(1, math.ceil(#cachedItems / pageSize))
+  local totalPages = math.max(1, math.ceil(#filtered / pageSize))
   pickerTotalPages = totalPages   -- save for touch handler
   if pickerPage > totalPages then pickerPage = totalPages end
   if pickerPage < 1          then pickerPage = 1          end
 
   local startIdx = (pickerPage - 1) * pageSize + 1
 
-  -- Title
+  -- Title + filter indicator
   mon.setTextColor(colors.yellow)
   mon.setCursorPos(1, 1)
   mon.write("SELECT ITEM")
+  if pickerFilter ~= "" then
+    local fStr = ' "' .. pickerFilter .. '"'
+    mon.setTextColor(colors.orange)
+    mon.setCursorPos(12, 1)
+    mon.write(truncate(fStr, w - 11 - #tostring(totalPages) * 2 - 4))
+  end
   local pgStr = ("pg %d/%d"):format(pickerPage, totalPages)
   mon.setTextColor(colors.gray)
   mon.setCursorPos(w - #pgStr + 1, 1)
@@ -322,19 +358,25 @@ local function drawPicker()
   mon.write(string.rep("-", w))
 
   -- Item rows
-  for row = 3, h - 2 do
-    local idx = startIdx + (row - 3)
-    if idx > #cachedItems then break end
-    local item     = cachedItems[idx]
-    local countStr = fmtCount(item.count)
-    local labelMax = w - #countStr - 2
-    mon.setTextColor(colors.white)
-    mon.setCursorPos(2, row)
-    mon.write(truncate(item.label, labelMax))
+  if #filtered == 0 then
     mon.setTextColor(colors.gray)
-    mon.setCursorPos(w - #countStr + 1, row)
-    mon.write(countStr)
-    pickerRowMap[row] = idx
+    mon.setCursorPos(2, 3)
+    mon.write(pickerFilter == "" and "No items found." or 'No matches for "' .. pickerFilter .. '".')
+  else
+    for row = 3, h - 2 do
+      local idx = startIdx + (row - 3)
+      if idx > #filtered then break end
+      local item     = filtered[idx]
+      local countStr = fmtCount(item.count)
+      local labelMax = w - #countStr - 2
+      mon.setTextColor(colors.white)
+      mon.setCursorPos(2, row)
+      mon.write(truncate(item.label, labelMax))
+      mon.setTextColor(colors.gray)
+      mon.setCursorPos(w - #countStr + 1, row)
+      mon.write(countStr)
+      pickerRowMap[row] = filtered[idx]   -- store item directly, not index
+    end
   end
 
   -- Footer
@@ -342,8 +384,8 @@ local function drawPicker()
   mon.setCursorPos(1, h - 1)
   mon.write(string.rep("-", w))
 
-  local prevText = "< PREV"
-  local nextText = "NEXT >"
+  local prevText   = "< PREV"
+  local nextText   = "NEXT >"
   local cancelText = "CANCEL"
 
   mon.setBackgroundColor(pickerPage > 1 and colors.gray or colors.black)
@@ -722,18 +764,14 @@ local function handleTouch(x, y)
       end
       return
     end
-    local cidx = pickerRowMap[y]
-    if cidx and cachedItems[cidx] then
-      local item = cachedItems[cidx]
-      -- Check not already in watchlist
+    local item = pickerRowMap[y]   -- item stored directly in map
+    if item then
+      -- Already filtered out watchlist dupes in refreshCache, but guard anyway
       local dup = false
       for _, wl in ipairs(watchlist) do
         if wl.name == item.name then dup = true; break end
       end
-      if dup then
-        -- Flash the row somehow; for now just ignore
-        return
-      end
+      if dup then return end
       pendingItem = { name = item.name, label = item.label }
       numpadStr     = ""
       numpadContext = "add"
@@ -836,6 +874,7 @@ local function termPrintHelp()
   print("  enable  <n>            enable alert for item n")
   print("  disable <n>            disable alert for item n")
   print("  threshold <n> <val>    change threshold for item n")
+  print("  search [term]          filter picker by name (no arg clears)")
 end
 
 local function termPrintList()
@@ -933,6 +972,18 @@ local function termThreshold(idx, val)
   print(("Threshold for %s set to %d"):format(watchlist[idx].label, val))
 end
 
+local function termSearch(term)
+  if term then
+    pickerFilter = term:lower()
+    print(('Picker filter set to "%s".'):format(pickerFilter))
+  else
+    pickerFilter = ""
+    print("Picker filter cleared.")
+  end
+  pickerPage = 1
+  if mode == "picker" then drawMonitor() end
+end
+
 local function terminalLoop()
   print("me-alerts: type 'help' for commands, Ctrl+T to stop.")
   while true do
@@ -949,6 +1000,7 @@ local function terminalLoop()
       elseif cmd == "enable"    then termEnable(tonumber(parts[2]), true)
       elseif cmd == "disable"   then termEnable(tonumber(parts[2]), false)
       elseif cmd == "threshold" then termThreshold(tonumber(parts[2]), tonumber(parts[3]))
+      elseif cmd == "search"    then termSearch(parts[2])
       else print("Unknown command. Type 'help'.") end
     end
   end
