@@ -115,7 +115,7 @@ local cachedItems = {}   -- [{name, label, count}]
 
 -- mode controls which screen is drawn and how touch events are handled
 local mode = "list"
--- "list" | "picker" | "numpad" | "edit_menu" | "confirm_del" | "confirm_clear" | "help"
+-- "list" | "picker" | "numpad" | "edit_menu" | "confirm_del" | "confirm_clear" | "snooze_pick" | "help"
 
 -- Picker
 local pickerPage   = 1
@@ -148,6 +148,8 @@ local numpadStartRow, numpadCancelRow
 local editRows      = {}   -- [row] = "threshold"|"delete"|"cancel"
 local yesDelRow, noDelRow
 local yesClearRow, noClearRow
+local snoozePickIndex = nil
+local snoozeRows      = {}   -- [row] = ms duration or "cancel"
 local helpButtonRow, helpButtonX
 
 -- ── watchlist save/load ───────────────────────────────────────────────────────
@@ -246,18 +248,24 @@ local function drawList()
     mon.setTextColor(colors.gray)
     mon.write("No alerts set. Tap ADD below.")
   else
+    local now = os.epoch("utc")
     for i, item in ipairs(watchlist) do
       if row > maxRow then break end
       local state    = alertState[item.name] or {}
       local count    = state.count    or 0
       local alerting = item.enabled and (state.alerting or false)
       local rate     = state.rate     or 0
+      local isSnoozed = (state.snoozedUntil or 0) > now
 
-      -- Status indicator (blinking when alerting)
+      -- Status indicator
       if not item.enabled then
         mon.setTextColor(colors.gray)
         mon.setCursorPos(1, row)
         mon.write("-")
+      elseif isSnoozed then
+        mon.setTextColor(colors.cyan)
+        mon.setCursorPos(1, row)
+        mon.write("~")
       elseif alerting then
         mon.setTextColor(blinkPhase and colors.red or colors.orange)
         mon.setCursorPos(1, row)
@@ -265,15 +273,14 @@ local function drawList()
       else
         mon.setTextColor(colors.green)
         mon.setCursorPos(1, row)
-        mon.write(string.char(0xE2, 0x9C, 0x93) ~= "" and "\x04" or "v")
-        -- CC char 0x04 is a small filled diamond; use checkmark char if available
-        -- Fallback handled below
-        mon.setCursorPos(1, row)
         mon.write("+")
       end
 
       -- Label
-      mon.setTextColor(alerting and (blinkPhase and colors.red or colors.orange) or colors.white)
+      local rowColor = isSnoozed and colors.gray
+                    or (alerting and (blinkPhase and colors.red or colors.orange))
+                    or colors.white
+      mon.setTextColor(rowColor)
       mon.setCursorPos(3, row)
       mon.write(truncate(item.label, labelMax))
 
@@ -282,7 +289,7 @@ local function drawList()
       local threshStr = ">" .. fmtCount(item.threshold)
 
       local secStart = w - delWidth - threshW - 1 - countW
-      mon.setTextColor(alerting and (blinkPhase and colors.red or colors.orange) or colors.white)
+      mon.setTextColor(rowColor)
       mon.setCursorPos(secStart, row)
       mon.write(string.rep(" ", countW - #countStr) .. countStr)
 
@@ -591,8 +598,18 @@ local function drawEditMenu()
 
   menuBtn(midH + 2, "[ CHANGE THRESHOLD ]", colors.gray)
   menuBtn(midH + 3, item.enabled and "[  DISABLE ALERT  ]" or "[   ENABLE ALERT  ]", colors.gray)
-  menuBtn(midH + 4, "[   DELETE ITEM   ]",  colors.red)
-  menuBtn(midH + 5, "[     CANCEL      ]",  colors.black)
+
+  local snoozedUntil = (alertState[item.name] or {}).snoozedUntil or 0
+  local isSnoozed    = snoozedUntil > os.epoch("utc")
+  if isSnoozed then
+    local remMin = math.ceil((snoozedUntil - os.epoch("utc")) / 60000)
+    menuBtn(midH + 4, ("[  CLEAR SNOOZE (~%dm) ]"):format(remMin), colors.orange)
+  else
+    menuBtn(midH + 4, "[   SNOOZE ALERT   ]", colors.cyan)
+  end
+
+  menuBtn(midH + 5, "[   DELETE ITEM   ]", colors.red)
+  menuBtn(midH + 6, "[     CANCEL      ]", colors.black)
 end
 
 local function drawConfirmDel()
@@ -657,6 +674,49 @@ local function drawConfirmClearAll()
   mon.write(noText)
 
   mon.setBackgroundColor(colors.black)
+end
+
+local function drawSnoozePick()
+  local w, h = mon.getSize()
+  snoozeRows = {}
+
+  local item = watchlist[snoozePickIndex]
+  if not item then mode = "list"; return end
+
+  local midH = math.floor(h / 2)
+
+  mon.setTextColor(colors.cyan)
+  local title = "SNOOZE ALERT"
+  mon.setCursorPos(math.floor((w - #title) / 2) + 1, midH - 3)
+  mon.write(title)
+
+  mon.setTextColor(colors.gray)
+  mon.setCursorPos(1, midH - 2)
+  mon.write(string.rep("-", w))
+
+  mon.setTextColor(colors.white)
+  local ln = truncate(item.label, w)
+  mon.setCursorPos(math.floor((w - #ln) / 2) + 1, midH - 1)
+  mon.write(ln)
+
+  mon.setTextColor(colors.gray)
+  mon.setCursorPos(1, midH)
+  mon.write(string.rep("-", w))
+
+  local function snoozeBtn(row, text, ms)
+    if row > h then return end
+    mon.setBackgroundColor(ms and colors.cyan or colors.gray)
+    mon.setTextColor(ms and colors.black or colors.white)
+    mon.setCursorPos(math.max(1, math.floor((w - #text) / 2) + 1), row)
+    mon.write(text)
+    mon.setBackgroundColor(colors.black)
+    snoozeRows[row] = ms or "cancel"
+  end
+
+  snoozeBtn(midH + 1, "[   5 minutes   ]",  5 * 60 * 1000)
+  snoozeBtn(midH + 2, "[  15 minutes   ]", 15 * 60 * 1000)
+  snoozeBtn(midH + 3, "[    1 hour     ]", 60 * 60 * 1000)
+  snoozeBtn(midH + 4, "[    CANCEL     ]", nil)
 end
 
 local function drawHelp()
@@ -729,6 +789,7 @@ local function drawMonitor()
   elseif mode == "edit_menu"     then drawEditMenu()
   elseif mode == "confirm_del"   then drawConfirmDel()
   elseif mode == "confirm_clear" then drawConfirmClearAll()
+  elseif mode == "snooze_pick"   then drawSnoozePick()
   elseif mode == "help"          then drawHelp()
   end
 end
@@ -929,6 +990,18 @@ local function handleTouch(x, y)
     elseif action:find("DISABLE") or action:find("ENABLE") then
       setEnabled(editMenuIndex, not watchlist[editMenuIndex].enabled)
       playSound("hat", 1, 12)
+    elseif action:find("SNOOZE ALERT") then
+      snoozePickIndex = editMenuIndex
+      mode = "snooze_pick"
+      drawMonitor()
+    elseif action:find("CLEAR SNOOZE") then
+      local item = watchlist[editMenuIndex]
+      if item and alertState[item.name] then
+        alertState[item.name].snoozedUntil = nil
+        alertState[item.name].alerting     = (alertState[item.name].count or 0) < item.threshold
+      end
+      mode = "list"; drawMonitor()
+      playSound("hat", 1, 12)
     elseif action:find("DELETE") then
       confirmDelIndex = editMenuIndex
       mode = "confirm_del"
@@ -966,6 +1039,25 @@ local function handleTouch(x, y)
     elseif y == noClearRow then
       mode = "list"; drawMonitor()
       playSound("hat", 1, 6)
+    end
+    return
+  end
+
+  if mode == "snooze_pick" then
+    local val = snoozeRows[y]
+    if val == "cancel" then
+      mode = "list"; drawMonitor()
+      playSound("hat", 1, 6)
+    elseif type(val) == "number" then
+      local item = watchlist[snoozePickIndex]
+      if item then
+        if not alertState[item.name] then alertState[item.name] = {} end
+        alertState[item.name].snoozedUntil = os.epoch("utc") + val
+        alertState[item.name].alerting     = false
+      end
+      mode = "list"
+      drawMonitor()
+      playSound("hat", 1, 18)
     end
     return
   end
@@ -1150,16 +1242,24 @@ local function alertLoop()
             end
           end
 
+          -- Snooze: auto-clear if expired
+          local snoozedUntil = state.snoozedUntil or 0
+          if snoozedUntil > 0 and snoozedUntil <= now then
+            snoozedUntil = 0
+          end
+          local isSnoozed = snoozedUntil > 0
+
           local wasAlerting = state.alerting
-          local isAlerting  = count < item.threshold
+          local isAlerting  = not isSnoozed and (count < item.threshold)
 
           alertState[item.name] = {
-            count     = count,
-            rate      = rate,
-            alerting  = isAlerting,
-            prevCount = count,
-            prevTime  = now,
-            lastSound = state.lastSound,
+            count        = count,
+            rate         = rate,
+            alerting     = isAlerting,
+            prevCount    = count,
+            prevTime     = now,
+            lastSound    = state.lastSound,
+            snoozedUntil = snoozedUntil > 0 and snoozedUntil or nil,
           }
 
           -- Sound: play on first alert, then repeat every ALERT_SOUND_INTERVAL
