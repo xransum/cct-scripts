@@ -347,7 +347,7 @@ local function drawRoster()
   mon.setTextColor(colors.gray)
   mon.setCursorPos(1, row); mon.write(string.rep("-", w)); row = row + 1
 
-  local function needRows(n) return row + n - 1 <= h - 1 end
+  local function needRows(n) return row + n - 1 <= h - 2 end
 
   -- ── online players (2 rows each) ───────────────────────────────────────────
   for i, p in ipairs(online) do
@@ -422,7 +422,10 @@ local function drawRoster()
     mon.setCursorPos(2, row); mon.write("No players seen yet.")
   end
 
-  -- ── footer legend ─────────────────────────────────────────────────────────
+  -- ── footer ─────────────────────────────────────────────────────────────────
+  mon.setTextColor(colors.gray)
+  mon.setCursorPos(1, h - 1)
+  mon.write(("* death count is approximate"):sub(1, w))
   legendLine(w, h, {
     {"+", colors.lime},    {" online", colors.gray},
     {"  |  ",              colors.gray},
@@ -480,7 +483,7 @@ local function drawStats()
     mon.setCursorPos(2, row); mon.write("No data yet."); row = row + 1
   else
     for _, p in ipairs(players) do
-      if row > h - 1 then break end
+      if row > h - 2 then break end
 
       -- Online indicator
       mon.setTextColor(p.isOnline and colors.lime or colors.gray)
@@ -511,6 +514,9 @@ local function drawStats()
 
   -- Footer legend
   if h >= row then
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(1, h - 1)
+    mon.write(("* death count is approximate"):sub(1, w))
     legendLine(w, h, {
       {"+", colors.lime},    {" online", colors.gray},
       {"  |  ",              colors.gray},
