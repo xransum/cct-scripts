@@ -122,8 +122,9 @@ local playerData   = {}   -- [name] = getPlayer() result, cached between polls
 local lastDeath    = {}   -- [name] = epoch of last recorded death (for deduplication)
 local knownNames   = {}   -- set: all names we have ever seen
 
-local view = "roster"   -- "roster" | "stats"
-local switchRow = 1       -- monitor row that toggles the view
+local view      = "roster"  -- "roster" | "stats"
+local switchRow = 1          -- monitor row that toggles the view
+local saveTimer = nil        -- forward-declared so recordDeath can reset it
 
 -- ── persistence ───────────────────────────────────────────────────────────────
 
@@ -190,6 +191,7 @@ local function recordDeath(name, source)
   lastDeath[name] = now
   persist[name].deaths = persist[name].deaths + 1
   saveData()
+  saveTimer = os.startTimer(SAVE_SECS)   -- reset heartbeat so we don't double-write
   playSound("bass", 3, 4)
   print(("[death] %s  (#%d via %s)"):format(name, persist[name].deaths, source or "?"))
 end
@@ -556,7 +558,7 @@ print("Config tip: set playerDetMaxRange=-1 in advancedperipherals.toml for serv
 
 local pollTimer = os.startTimer(POLL_SECS)
 local drawTimer = os.startTimer(DRAW_SECS)
-local saveTimer = os.startTimer(SAVE_SECS)
+saveTimer       = os.startTimer(SAVE_SECS)
 
 while true do
   local ev = { os.pullEvent() }
