@@ -351,9 +351,11 @@ local function drawPicker()
     end
   end
 
-  -- How many items fit between header (3 rows) and footer (2 rows)
-  local pageSize = h - 5
-  if pageSize < 1 then pageSize = 1 end
+  -- itemStart depends on whether the hint banner occupies row 3
+  local itemStart = (pickerFilter == "") and 4 or 3
+
+  -- pageSize: rows itemStart..h-2, minus 1 to leave a small scroll buffer
+  local pageSize = math.max(1, h - 2 - itemStart)
 
   local totalPages = math.max(1, math.ceil(#filtered / pageSize))
   pickerTotalPages = totalPages   -- save for touch handler
@@ -395,14 +397,28 @@ local function drawPicker()
   mon.setCursorPos(1, 2)
   mon.write(string.rep("-", w))
 
+  -- Cyan hint banner on row 3 when no filter is active
+  if pickerFilter == "" then
+    mon.setBackgroundColor(colors.cyan)
+    mon.setTextColor(colors.black)
+    mon.setCursorPos(1, 3)
+    mon.write(string.rep(" ", w))
+    local bannerText  = "terminal: search [keyword]"
+    local shortBanner = "search [keyword]"
+    local txt = #bannerText <= w and bannerText or shortBanner
+    mon.setCursorPos(math.max(1, math.floor((w - #txt) / 2) + 1), 3)
+    mon.write(truncate(txt, w))
+    mon.setBackgroundColor(colors.black)
+  end
+
   -- Item rows
   if #filtered == 0 then
     mon.setTextColor(colors.gray)
-    mon.setCursorPos(2, 3)
+    mon.setCursorPos(2, itemStart)
     mon.write(pickerFilter == "" and "No items found." or 'No matches for "' .. pickerFilter .. '".')
   else
-    for row = 3, h - 2 do
-      local idx = startIdx + (row - 3)
+    for row = itemStart, h - 2 do
+      local idx = startIdx + (row - itemStart)
       if idx > #filtered then break end
       local item     = filtered[idx]
       local countStr = fmtCount(item.count)
