@@ -95,6 +95,10 @@ local function playSound(inst, vol, pitch)
   if speaker then pcall(speaker.playNote, inst, vol or 1, pitch or 12) end
 end
 
+local function playSoundEffect(name, vol, pitch)
+  if speaker then pcall(speaker.playSound, name, vol or 1, pitch or 1) end
+end
+
 -- ── state ─────────────────────────────────────────────────────────────────────
 
 -- Watchlist: [{name, label, threshold, enabled}]
@@ -1162,7 +1166,7 @@ local function alertLoop()
           if isAlerting then
             local lastSnd = state.lastSound or 0
             if not wasAlerting or (now - lastSnd) >= ALERT_SOUND_INTERVAL * 1000 then
-              playSound("bell", 3, 18)
+              playSoundEffect("immersiveengineering:alert", 3, 1)
               alertState[item.name].lastSound = now
             end
           end
