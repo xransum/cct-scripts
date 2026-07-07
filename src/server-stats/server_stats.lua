@@ -1,13 +1,17 @@
 -- server_stats.lua
--- CC:Tweaked: world time, day/night bar, moon phase, uptime and world age on a monitor.
+-- CC:Tweaked: world time, day/night bar, moon phase, and persistent uptime on a monitor.
 -- No ME Bridge required.
 --
--- Session uptime resets every time this script (re)starts, which happens on
--- every server restart, so it is a reliable proxy for server uptime.
+-- Uptime is persisted to server_stats.cfg so it survives CC computer reboots.
+-- A gap > REBOOT_THRESHOLD_MS between the last heartbeat and startup is treated
+-- as a server restart: the previous session is credited and a new one begins.
+-- Total uptime accumulates across all server sessions indefinitely.
 --
 -- Attach an Advanced Monitor and run, or use startup.lua.
 
-local REFRESH = 1   -- seconds between redraws (1s keeps the clock live)
+local REFRESH             = 1          -- seconds between redraws (1s keeps the clock live)
+local CFG_FILE            = "server_stats.cfg"
+local REBOOT_THRESHOLD_MS = 90 * 1000  -- gap < 90 s → computer reboot; ≥ 90 s → server restart
 
 -- ── peripheral ───────────────────────────────────────────────────────────────
 
@@ -17,9 +21,44 @@ if not mon then
 end
 mon.setTextScale(0.5)
 
--- ── session start (captured once; resets on each server restart) ──────────────
+-- ── cfg persistence ───────────────────────────────────────────────────────────
 
-local sessionStartMs  = os.epoch("utc")   -- real-world ms
+local function loadCfg()
+  if not fs.exists(CFG_FILE) then return nil end
+  local f = fs.open(CFG_FILE, "r")
+  local raw = f.readAll(); f.close()
+  local ok, t = pcall(textutils.unserialize, raw)
+  return (ok and type(t) == "table") and t or nil
+end
+
+local function saveCfg(t)
+  local f = fs.open(CFG_FILE, "w")
+  f.write(textutils.serialize(t))
+  f.close()
+end
+
+-- ── server session tracking ───────────────────────────────────────────────────
+-- On startup, compare now against the last heartbeat in the cfg file:
+--   small gap  → CC computer was rebooted while server stayed up  → resume session
+--   large gap  → server restarted (or first run)                  → credit + start fresh
+
+local now = os.epoch("utc")
+local cfg = loadCfg()
+local totalAccumulatedMs, serverSessionStartMs
+
+if cfg and cfg.lastHeartbeatMs and (now - cfg.lastHeartbeatMs) < REBOOT_THRESHOLD_MS then
+  -- Computer reboot: resume the existing server session
+  totalAccumulatedMs   = cfg.totalMs        or 0
+  serverSessionStartMs = cfg.sessionStartMs or now
+else
+  -- Server restart or first run: credit previous session up to its last heartbeat
+  local prevMs = 0
+  if cfg and cfg.sessionStartMs and cfg.lastHeartbeatMs then
+    prevMs = math.max(0, cfg.lastHeartbeatMs - cfg.sessionStartMs)
+  end
+  totalAccumulatedMs   = (cfg and cfg.totalMs or 0) + prevMs
+  serverSessionStartMs = now
+end
 
 -- ── constants ────────────────────────────────────────────────────────────────
 
@@ -37,8 +76,9 @@ local MOON_PHASES = {
 
 -- ── helpers ───────────────────────────────────────────────────────────────────
 
--- Real-world (wall-clock) duration
-local function fmtRealUptime(ms)
+-- Format a millisecond duration as a human-readable string
+local function fmtDuration(ms)
+  if not ms or ms < 0 then ms = 0 end
   local s = math.floor(ms / 1000)
   local d = math.floor(s / 86400); s = s % 86400
   local h = math.floor(s / 3600);  s = s % 3600
@@ -222,9 +262,11 @@ local function draw()
   sep(evRow + 1)
 
   -- ── uptime ────────────────────────────────────────────────────────────────
-  local uptRow = evRow + 2
-  lv(uptRow,     "Real uptime:", fmtRealUptime(os.epoch("utc") - sessionStartMs), colors.gray, colors.lime)
-  lv(uptRow + 1, "World age:",  ("Day %d"):format(os.day()),                     colors.gray, colors.cyan)
+  local uptRow     = evRow + 2
+  local serverUpMs = os.epoch("utc") - serverSessionStartMs
+  local totalUpMs  = totalAccumulatedMs + serverUpMs
+  lv(uptRow,     "Server up:", fmtDuration(serverUpMs), colors.gray, colors.lime)
+  lv(uptRow + 1, "Total up:",  fmtDuration(totalUpMs),  colors.gray, colors.cyan)
 
   -- ── footer ────────────────────────────────────────────────────────────────
   local credit = "-- github.com/xransum"
@@ -240,5 +282,10 @@ print("Monitor: " .. peripheral.getName(mon))
 
 while true do
   draw()
+  saveCfg({
+    totalMs         = totalAccumulatedMs,
+    sessionStartMs  = serverSessionStartMs,
+    lastHeartbeatMs = os.epoch("utc"),
+  })
   sleep(REFRESH)
 end

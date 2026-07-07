@@ -1,5 +1,5 @@
 -- player_stats.lua
--- CC:Tweaked: live player dashboard + persistent death counter.
+-- CC:Tweaked: live player roster + persistent playtime and death counter.
 --
 -- Requires:
 --   Advanced Peripherals Player Detector  (peripheral: player_detector / playerDetector)
@@ -17,20 +17,24 @@
 -- Either method independently increments the counter; duplicates within a 5-second
 -- window are suppressed.
 --
--- Session time is tracked via playerJoin / playerLeave events and accumulated in a
--- save file so totals survive script restarts and server reboots.
+-- Playtime is tracked via playerJoin / playerLeave events.  A heartbeat is written
+-- every poll cycle so that in-progress sessions are credited even if the server
+-- crashes; on restart the previous session is credited up to the last heartbeat,
+-- losing at most POLL_SECS of play time.  A gap < REBOOT_THRESHOLD_MS between the
+-- last heartbeat and now is treated as a CC computer reboot (server still running)
+-- and the session is resumed transparently.
 --
--- Display has two views, toggled by tapping the title row of the monitor:
---   ONLINE  — health bars, dimension, current session time per player
---   STATS   — deaths + total time for all known players, sorted by death count
+-- Display shows a single ROSTER view (all known players, online first) toggleable
+-- to a STATS leaderboard sorted by deaths.
 --
 -- Config: set playerDetMaxRange = -1 in config/advancedperipherals.toml to allow
 --         the detector to see players anywhere on the server (not just nearby).
 
-local SAVE_FILE        = "player_stats.cfg"
-local POLL_SECS        = 2      -- seconds between health polls
-local DRAW_SECS        = 1      -- seconds between display refreshes (keeps timers live)
-local DEDUPE_MS        = 5000   -- ms window to suppress duplicate death counts
+local SAVE_FILE            = "player_stats.cfg"
+local POLL_SECS            = 2          -- seconds between health polls
+local DRAW_SECS            = 1          -- seconds between display refreshes (keeps timers live)
+local DEDUPE_MS            = 5000       -- ms window to suppress duplicate death counts
+local REBOOT_THRESHOLD_MS  = 90 * 1000  -- gap < 90 s → CC reboot (server up); ≥ 90 s → server restart
 
 -- ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,7 +121,7 @@ local playerData   = {}   -- [name] = getPlayer() result, cached between polls
 local lastDeath    = {}   -- [name] = epoch of last recorded death (for deduplication)
 local knownNames   = {}   -- set: all names we have ever seen
 
-local view = "online"     -- "online" | "stats"
+local view = "roster"   -- "roster" | "stats"
 local switchRow = 1       -- monitor row that toggles the view
 
 -- ── persistence ───────────────────────────────────────────────────────────────
@@ -130,12 +134,49 @@ local function ensurePlayer(name)
 end
 
 local function saveData()
-  saveTable(SAVE_FILE, persist)
+  -- Snapshot persist + live sessionStart timestamps into a single table.
+  -- _savedAt lets loadData() distinguish a CC computer reboot from a server restart.
+  local out = { _savedAt = os.epoch("utc") }
+  for name, data in pairs(persist) do
+    out[name] = {
+      deaths        = data.deaths,
+      totalMs       = data.totalMs,
+      lastSeen      = data.lastSeen,
+      sessionStartMs = sessionStart[name],   -- nil when offline → absent from file
+    }
+  end
+  saveTable(SAVE_FILE, out)
 end
 
 local function loadData()
-  persist = loadTable(SAVE_FILE, {})
-  for name in pairs(persist) do knownNames[name] = true end
+  local saved    = loadTable(SAVE_FILE, {})
+  local savedAt  = saved._savedAt          -- nil for old-format files → treated as server restart
+  local now      = os.epoch("utc")
+  local isReboot = savedAt ~= nil and (now - savedAt) < REBOOT_THRESHOLD_MS
+
+  for name, data in pairs(saved) do
+    if name == "_savedAt" then
+      -- metadata key, skip
+    elseif type(name) == "string" and type(data) == "table" then
+      persist[name] = {
+        deaths   = data.deaths   or 0,
+        totalMs  = data.totalMs  or 0,
+        lastSeen = data.lastSeen or now,
+      }
+      knownNames[name] = true
+
+      if data.sessionStartMs then
+        if isReboot then
+          -- CC computer reboot: server kept running, resume the open session
+          sessionStart[name] = data.sessionStartMs
+        else
+          -- Server restart: credit playtime up to the last heartbeat
+          persist[name].totalMs = persist[name].totalMs +
+            math.max(0, savedAt - data.sessionStartMs)
+        end
+      end
+    end
+  end
 end
 
 -- ── death recording ───────────────────────────────────────────────────────────
@@ -176,6 +217,22 @@ end
 
 local function initOnline()
   local online = safeCall(detector.getOnlinePlayers) or {}
+  local onlineSet = {}
+  for _, name in ipairs(online) do onlineSet[name] = true end
+
+  -- If we resumed a session for a player who is no longer actually online
+  -- (they left during the downtime), credit their time and clear the session.
+  for name in pairs(sessionStart) do
+    if not onlineSet[name] then
+      ensurePlayer(name)
+      persist[name].totalMs  = persist[name].totalMs + (os.epoch("utc") - sessionStart[name])
+      persist[name].lastSeen = os.epoch("utc")
+      sessionStart[name]     = nil
+    end
+  end
+
+  -- Ensure all currently online players have a session start.
+  -- Resumed players already have sessionStart set; newly seen players get now.
   for _, name in ipairs(online) do
     ensurePlayer(name)
     if not sessionStart[name] then
@@ -240,22 +297,30 @@ local function drawHealthBar(row, col, barW, health, maxHealth)
   mon.setBackgroundColor(colors.black)
 end
 
-local function drawOnline()
+local function drawRoster()
   local w, h = mon.getSize()
-  local BAR_W = math.max(6, math.floor(w * 0.3))
+  local BAR_W = math.max(6, math.floor(w * 0.28))
+  local now   = os.epoch("utc")
 
-  -- Collect currently online players
-  local online = {}
-  for name in pairs(sessionStart) do online[#online + 1] = name end
-  table.sort(online)
+  -- Build two sorted lists: online (alpha) then offline (most recently seen first)
+  local online, offline = {}, {}
+  for name, data in pairs(persist) do
+    local isOnline = sessionStart[name] ~= nil
+    local totalMs  = data.totalMs + (isOnline and (now - sessionStart[name]) or 0)
+    local entry = { name=name, isOnline=isOnline, totalMs=totalMs,
+                    deaths=data.deaths, lastSeen=data.lastSeen }
+    if isOnline then online[#online+1] = entry
+    else             offline[#offline+1] = entry end
+  end
+  table.sort(online,  function(a,b) return a.name:lower() < b.name:lower() end)
+  table.sort(offline, function(a,b) return a.lastSeen > b.lastSeen end)
 
   local row = 1
 
-  -- Title row (tap to switch view)
+  -- ── title ──────────────────────────────────────────────────────────────────
   switchRow = row
   mon.setTextColor(colors.yellow)
-  mon.setCursorPos(1, row)
-  mon.write("PLAYERS")
+  mon.setCursorPos(1, row); mon.write("PLAYERS")
 
   local onlineTag = "(" .. #online .. " online)"
   mon.setTextColor(colors.lime)
@@ -264,67 +329,91 @@ local function drawOnline()
 
   local toggle = "[stats >]"
   mon.setTextColor(colors.cyan)
-  mon.setCursorPos(w - #toggle + 1, row)
-  mon.write(toggle)
+  mon.setCursorPos(w - #toggle + 1, row); mon.write(toggle)
   row = row + 1
 
   mon.setTextColor(colors.gray)
   mon.setCursorPos(1, row); mon.write(string.rep("-", w)); row = row + 1
 
-  if #online == 0 then
-    mon.setTextColor(colors.gray)
-    mon.setCursorPos(2, row)
-    mon.write("No players online.")
+  local function needRows(n) return row + n - 1 <= h - 1 end
+
+  -- ── online players (2 rows each) ───────────────────────────────────────────
+  for i, p in ipairs(online) do
+    if not needRows(2) then break end
+
+    local data    = playerData[p.name] or {}
+    local dim     = fmtDim(data.dimension)
+    local health  = data.health    or 0
+    local maxHP   = data.maxHealth or 20
+    local sessStr = fmtDuration(now - (sessionStart[p.name] or now))
+    local totStr  = fmtDuration(p.totalMs)
+
+    -- Row 1: + Name   dim   session
+    local right1  = dim .. "  " .. sessStr
+    local nameMax = w - 2 - #right1 - 1
+    mon.setTextColor(colors.lime);  mon.setCursorPos(1, row); mon.write("+")
+    mon.setTextColor(colors.white); mon.setCursorPos(2, row); mon.write(truncate(p.name, nameMax))
+    mon.setTextColor(colors.gray);  mon.setCursorPos(w - #right1 + 1, row); mon.write(right1)
     row = row + 1
-  else
-    for _, name in ipairs(online) do
-      if row + 1 > h - 1 then break end   -- need at least 2 rows
 
-      local data    = playerData[name] or {}
-      local dim     = fmtDim(data.dimension)
-      local health  = data.health    or 0
-      local maxHP   = data.maxHealth or 20
-      local sess    = fmtDuration(os.epoch("utc") - (sessionStart[name] or os.epoch("utc")))
-      local deaths  = persist[name] and persist[name].deaths or 0
+    -- Row 2: [health bar]  hp  deaths  total
+    drawHealthBar(row, 2, BAR_W, health, maxHP)
+    local hpStr    = ("  %d/%d hp"):format(math.floor(health), math.floor(maxHP))
+    local deathStr = tostring(p.deaths) .. "d"
+    local right2   = deathStr .. "  " .. totStr
+    mon.setTextColor(colors.white)
+    mon.setCursorPos(2 + BAR_W, row)
+    mon.write(truncate(hpStr, w - BAR_W - 2 - #right2 - 2))
+    mon.setTextColor(colors.red);
+    mon.setCursorPos(w - #totStr - #deathStr - 1, row); mon.write(deathStr)
+    mon.setTextColor(colors.cyan)
+    mon.setCursorPos(w - #totStr + 1, row); mon.write(totStr)
+    row = row + 1
 
-      -- Row 1: name  |  dimension  session-time
-      local rightStr = dim .. "  " .. sess
-      local nameMax  = w - #rightStr - 2
-      mon.setTextColor(colors.white)
-      mon.setCursorPos(2, row)
-      mon.write(truncate(name, nameMax))
+    -- separator between online players (not after last)
+    if needRows(1) and i < #online then
       mon.setTextColor(colors.gray)
-      mon.setCursorPos(w - #rightStr + 1, row)
-      mon.write(rightStr)
-      row = row + 1
-
-      -- Row 2: health bar  hp  deaths
-      drawHealthBar(row, 2, BAR_W, health, maxHP)
-      local hpStr     = ("  %d/%d hp"):format(math.floor(health), math.floor(maxHP))
-      local deathStr  = deaths .. "d"
-      mon.setTextColor(colors.white)
-      mon.setCursorPos(2 + BAR_W, row)
-      mon.write(truncate(hpStr, w - BAR_W - 2 - #deathStr - 1))
-      mon.setTextColor(colors.red)
-      mon.setCursorPos(w - #deathStr + 1, row)
-      mon.write(deathStr)
-      row = row + 1
-
-      -- Separator between players (skip after last)
-      if row <= h - 1 and online[#online] ~= name then
-        mon.setTextColor(colors.gray)
-        mon.setCursorPos(1, row); mon.write(string.rep("-", w)); row = row + 1
-      end
+      mon.setCursorPos(1, row); mon.write(string.rep("-", w)); row = row + 1
     end
   end
 
-  -- Footer: detection method note
-  if h >= row then
-    local note = chatBox and "death: chat+health" or "death: health poll"
+  -- ── divider between online and offline sections ────────────────────────────
+  if #online > 0 and #offline > 0 and needRows(1) then
     mon.setTextColor(colors.gray)
-    mon.setCursorPos(w - #note + 1, h)
-    mon.write(note)
+    mon.setCursorPos(1, row); mon.write(string.rep("-", w)); row = row + 1
   end
+
+  -- ── offline players (1 row each) ──────────────────────────────────────────
+  for _, p in ipairs(offline) do
+    if not needRows(1) then break end
+
+    local agoStr   = fmtDuration(now - p.lastSeen) .. " ago"
+    local totStr   = fmtDuration(p.totalMs)
+    local deathStr = tostring(p.deaths) .. "d"
+    local right1   = agoStr .. "  " .. deathStr .. "  " .. totStr
+    local nameMax  = w - 2 - #right1 - 1
+
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(1, row); mon.write(" ")
+    mon.setCursorPos(2, row); mon.write(truncate(p.name, nameMax))
+    mon.setCursorPos(w - #totStr - #deathStr - #agoStr - 3, row); mon.write(agoStr)
+    mon.setTextColor(colors.red)
+    mon.setCursorPos(w - #totStr - #deathStr - 1, row); mon.write(deathStr)
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(w - #totStr + 1, row); mon.write(totStr)
+    row = row + 1
+  end
+
+  -- ── empty state ────────────────────────────────────────────────────────────
+  if #online == 0 and #offline == 0 then
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(2, row); mon.write("No players seen yet.")
+  end
+
+  -- ── footer ─────────────────────────────────────────────────────────────────
+  local note = chatBox and "death: chat+health" or "death: health poll"
+  mon.setTextColor(colors.gray)
+  mon.setCursorPos(w - #note + 1, h); mon.write(note)
 end
 
 local function drawStats()
@@ -359,7 +448,7 @@ local function drawStats()
   mon.setCursorPos(1, row)
   mon.write("PLAYER STATS")
 
-  local toggle = "[< online]"
+  local toggle = "[< roster]"
   mon.setTextColor(colors.cyan)
   mon.setCursorPos(w - #toggle + 1, row)
   mon.write(toggle)
@@ -414,8 +503,8 @@ end
 local function drawMonitor()
   mon.setBackgroundColor(colors.black)
   mon.clear()
-  if view == "online" then
-    drawOnline()
+  if view == "roster" then
+    drawRoster()
   else
     drawStats()
   end
@@ -447,6 +536,7 @@ while true do
   if event == "timer" then
     if ev[2] == pollTimer then
       pollHealth()
+      saveData()      -- heartbeat: preserves in-progress sessions across crashes
       drawMonitor()
       pollTimer = os.startTimer(POLL_SECS)
     elseif ev[2] == drawTimer then
@@ -473,7 +563,7 @@ while true do
   elseif event == "monitor_touch" then
     -- ev = { "monitor_touch", side, x, y }
     if ev[2] == monName and ev[4] == switchRow then
-      view = (view == "online") and "stats" or "online"
+      view = (view == "roster") and "stats" or "roster"
       drawMonitor()
     end
   end
