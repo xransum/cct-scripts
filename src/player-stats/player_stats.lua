@@ -33,6 +33,7 @@
 local SAVE_FILE            = "player_stats.cfg"
 local POLL_SECS            = 2          -- seconds between health polls
 local DRAW_SECS            = 1          -- seconds between display refreshes (keeps timers live)
+local SAVE_SECS            = 15         -- seconds between heartbeat saves (limits disk I/O)
 local DEDUPE_MS            = 5000       -- ms window to suppress duplicate death counts
 local REBOOT_THRESHOLD_MS  = 90 * 1000  -- gap < 90 s → CC reboot (server up); ≥ 90 s → server restart
 
@@ -555,6 +556,7 @@ print("Config tip: set playerDetMaxRange=-1 in advancedperipherals.toml for serv
 
 local pollTimer = os.startTimer(POLL_SECS)
 local drawTimer = os.startTimer(DRAW_SECS)
+local saveTimer = os.startTimer(SAVE_SECS)
 
 while true do
   local ev = { os.pullEvent() }
@@ -563,12 +565,14 @@ while true do
   if event == "timer" then
     if ev[2] == pollTimer then
       pollHealth()
-      saveData()      -- heartbeat: preserves in-progress sessions across crashes
       drawMonitor()
       pollTimer = os.startTimer(POLL_SECS)
     elseif ev[2] == drawTimer then
       drawMonitor()   -- keeps session timers counting up live
       drawTimer = os.startTimer(DRAW_SECS)
+    elseif ev[2] == saveTimer then
+      saveData()      -- heartbeat: preserves in-progress sessions across crashes
+      saveTimer = os.startTimer(SAVE_SECS)
     end
 
   elseif event == "playerJoin" then
