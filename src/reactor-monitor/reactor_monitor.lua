@@ -42,6 +42,7 @@ local PANELS          = { PANEL_DASHBOARD, PANEL_RODS, PANEL_SCRAM }
 -- ── peripherals ───────────────────────────────────────────────────────────────
 
 local reactor = peripheral.find("extremereactor-reactorComputerPort")
+               or peripheral.find("BigReactors-Reactor")
 if not reactor then
   error("No Extreme Reactors computer port found. Attach or wire one to this computer.")
 end
@@ -105,6 +106,12 @@ end
 local function pct(a, b)
   if b == 0 then return 0 end
   return math.floor(a / b * 100)
+end
+
+local function fmtStep(n)
+  if n >= 1000000 then return string.format("%dM", n/1000000)
+  elseif n >= 1000 then return string.format("%dk", n/1000)
+  else return tostring(n) end
 end
 
 local function tempColor(t)
@@ -178,19 +185,32 @@ end
 local function autoAdjustRods()
   if not cfg.autoMode or not cfg.autoTarget then return end
   if not state.active or state.error then return end
+
   local current = state.energyLastTick or 0
   local target  = cfg.autoTarget
-  local err     = current - target
-  local delta   = 0
-  if     err >  2000 then delta = -ROD_STEP_FAST
-  elseif err >   500 then delta = -ROD_STEP
-  elseif err < -2000 then delta =  ROD_STEP_FAST
-  elseif err <  -500 then delta =  ROD_STEP
+  local err     = current - target  -- positive = over-producing, negative = under-producing
+
+  -- Scale step size to error magnitude for smoother convergence.
+  -- Higher rod insertion = more rods in = less flux = less output.
+  -- Over target  → insert rods (+insertion) to reduce output.
+  -- Under target → withdraw rods (-insertion) to increase output.
+  local absErr = math.abs(err)
+  local delta  = 0
+  if absErr > 5000 then
+    delta = err > 0 and 10 or -10   -- large error: big step
+  elseif absErr > 2000 then
+    delta = err > 0 and  5 or  -5   -- medium error: normal step
+  elseif absErr > 500 then
+    delta = err > 0 and  2 or  -2   -- small error: fine step
   end
+  -- Dead-band: within ±500 FE/t of target → leave rods alone
+
   if delta ~= 0 then
     local current_level = state.rodLevels and state.rodLevels[0] or 50
     local new_level = clamp(current_level + delta, 0, MAX_ROD_AUTO)
-    pcall(reactor.setAllControlRodLevels, new_level)
+    if new_level ~= current_level then
+      pcall(reactor.setAllControlRodLevels, new_level)
+    end
   end
 end
 
@@ -255,6 +275,10 @@ end
 
 local tabIndex = 1   -- 1=dashboard, 2=rods, 3=scram
 local TAB_LABELS = { "Dashboard", "Rods", "SCRAM" }
+
+-- Auto-target step size cycles: 500 → 5k → 50k → 1M → back to 500
+local AUTO_STEPS    = { 500, 5000, 50000, 1000000 }
+local autoStepIndex = 1
 
 -- ── rod panel scroll state ────────────────────────────────────────────────────
 
@@ -383,38 +407,34 @@ local function drawDashboard(mon, monName, startRow)
 
   -- Fuel bar
   if at(row) then
-    local fp = pct(state.fuelAmt or 0, state.fuelMax or 1)
-    local barW = math.max(4, w - 20)
-    local fuelBar = bar(state.fuelAmt or 0, state.fuelMax or 1, barW)
-    local fuelStr = string.format("Fuel:  [%s] %d%%", fuelBar, fp)
-    local amtStr  = string.format("%d/%d mB", state.fuelAmt or 0, state.fuelMax or 0)
-    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write("Fuel: ")
+    local fp     = pct(state.fuelAmt or 0, state.fuelMax or 1)
+    local amtStr = string.format("%d/%d mB", state.fuelAmt or 0, state.fuelMax or 0)
+    local prefix = "Fuel: "
+    -- bar fills the gap between prefix and right-aligned amtStr
+    -- layout: "Fuel: [####----] 642276/700000 mB"
+    -- col 1..#prefix, then "[", bar, "]", " ", amtStr right-aligned
+    local bw  = math.max(2, w - #prefix - 2 - 1 - #amtStr)  -- 2 = "[" + "]", 1 = space
     local col = fp > 30 and colors.lime or fp > 10 and colors.yellow or colors.red
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write(prefix)
     mon.setTextColor(col)
-    mon.setCursorPos(7, row)
-    local bw = w - 6 - #amtStr - 1
-    if bw > 2 then
-      mon.write("[" .. bar(state.fuelAmt or 0, state.fuelMax or 1, bw) .. "]")
-    end
+    mon.write("[" .. bar(state.fuelAmt or 0, state.fuelMax or 1, bw) .. "]")
     mon.setTextColor(colors.white)
-    mon.setCursorPos(w - #amtStr + 1, row); mon.write(amtStr)
+    mon.write(" " .. amtStr)
   end
   row = row + 1
 
   -- Waste bar
   if at(row) then
-    local wp = pct(state.wasteAmt or 0, state.fuelMax or 1)
+    local wp     = pct(state.wasteAmt or 0, state.fuelMax or 1)
     local amtStr = string.format("%d mB (%d%%)", state.wasteAmt or 0, wp)
-    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write("Waste:")
+    local prefix = "Waste:"
+    local bw  = math.max(2, w - #prefix - 2 - 1 - #amtStr)
     local col = wp < 20 and colors.lime or wp < 50 and colors.yellow or colors.red
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write(prefix)
     mon.setTextColor(col)
-    local bw = w - 7 - #amtStr - 1
-    mon.setCursorPos(7, row)
-    if bw > 2 then
-      mon.write("[" .. bar(state.wasteAmt or 0, state.fuelMax or 1, bw) .. "]")
-    end
+    mon.write("[" .. bar(state.wasteAmt or 0, state.fuelMax or 1, bw) .. "]")
     mon.setTextColor(colors.white)
-    mon.setCursorPos(w - #amtStr + 1, row); mon.write(amtStr)
+    mon.write(" " .. amtStr)
   end
   row = row + 1
   sep(row); row = row + 1
@@ -434,15 +454,15 @@ local function drawDashboard(mon, monName, startRow)
   row = row + 1
 
   if at(row) then
-    local rxStr  = string.format("%.1f%%", state.reactivity or 0)
-    local fcStr  = string.format("%.3f mB/t", state.fuelConsumed or 0)
-    mon.setTextColor(colors.gray); mon.setCursorPos(1, row)
-    mon.write("React:")
-    mon.setTextColor(colors.cyan); mon.write(" "..rxStr)
-    mon.setTextColor(colors.gray)
-    local half = math.floor(w/2)
-    mon.setCursorPos(half+1, row); mon.write("Fuel/t:")
-    mon.setTextColor(colors.white); mon.write(" "..fcStr)
+    local rxStr = string.format("%.1f%%", state.reactivity or 0)
+    local fcStr = string.format("%.3f mB/t", state.fuelConsumed or 0)
+    local half  = math.floor(w / 2)
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write("React:")
+    mon.setTextColor(colors.cyan); mon.write(" " .. rxStr)
+    mon.setTextColor(colors.gray); mon.setCursorPos(half + 1, row); mon.write("F/t:")
+    mon.setTextColor(colors.white)
+    -- allow up to end of line
+    mon.write(" " .. fcStr:sub(1, w - half - 5))
   end
   row = row + 1
   sep(row); row = row + 1
@@ -460,49 +480,83 @@ local function drawDashboard(mon, monName, startRow)
   row = row + 1
 
   if at(row) then
-    local ep = pct(state.energyStored or 0, state.energyCap or 1)
-    local capStr = fmtFE(state.energyCap or 0)
-    local storedStr = fmtFE(state.energyStored or 0)
-    local amtStr = storedStr.."/"..capStr
-    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write("Stored:")
-    local col = ep > 30 and colors.cyan or ep > 10 and colors.yellow or colors.red
+    local ep      = pct(state.energyStored or 0, state.energyCap or 1)
+    local amtStr  = fmtFE(state.energyStored or 0) .. "/" .. fmtFE(state.energyCap or 0)
+    local prefix  = "Stored:"
+    local bw      = math.max(2, w - #prefix - 2 - 1 - #amtStr)
+    local col     = ep > 30 and colors.cyan or ep > 10 and colors.yellow or colors.red
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write(prefix)
     mon.setTextColor(col)
-    local bw = w - 8 - #amtStr - 1
-    mon.setCursorPos(8, row)
-    if bw > 2 then
-      mon.write("[" .. bar(state.energyStored or 0, state.energyCap or 1, bw) .. "]")
-    end
+    mon.write("[" .. bar(state.energyStored or 0, state.energyCap or 1, bw) .. "]")
     mon.setTextColor(colors.white)
-    mon.setCursorPos(w - #amtStr + 1, row); mon.write(amtStr:sub(1, w - 7))
+    mon.write(" " .. amtStr)
   end
   row = row + 1
   sep(row); row = row + 1
 
-  -- Auto-rod row
+  -- Auto-rod rows (two rows: toggle+target, then step controls)
+  -- Row 1: [Auto: ON] / [Manual]   Target: 10.0kFE/t   Rod:45%
   if at(row) then
-    local autoOn  = cfg.autoMode == true
-    local tgt     = cfg.autoTarget or AUTO_TARGET_DEF
-    local aLabel  = autoOn and "Auto: ON " or "Auto: OFF"
-    local aCol    = autoOn and colors.lime or colors.gray
+    local autoOn = cfg.autoMode == true
+    local tgt    = cfg.autoTarget or AUTO_TARGET_DEF
+    local rodPct = (state.rodLevels and state.rodLevels[0]) or 0
+    local aLabel = autoOn and "Auto: ON" or "Manual  "
+    local aCol   = autoOn and colors.lime or colors.orange
     mon.setTextColor(aCol)
     mon.setCursorPos(1, row); mon.write(aLabel)
     addHit(monName, 1, row, #aLabel, row, "toggle_auto")
-
     if autoOn then
-      local tgtStr = " Tgt:"..fmtFEt(tgt)
+      local info = " Tgt:" .. fmtFEt(tgt) .. "  Rod:" .. rodPct .. "%"
       mon.setTextColor(colors.white)
-      mon.write(tgtStr:sub(1, w - #aLabel - 7))
+      mon.write(info:sub(1, w - #aLabel))
+    else
+      local info = "  Rod:" .. rodPct .. "%"
+      mon.setTextColor(colors.gray)
+      mon.write(info:sub(1, w - #aLabel))
     end
+  end
+  row = row + 1
 
-    -- [-] [+] buttons at right
-    local plusX  = w - 2
-    local minusX = w - 6
-    mon.setTextColor(colors.lime)
-    writeAt(mon, plusX,  row, "[+]")
-    addHit(monName, plusX, row, w, row, "auto_plus")
+  -- Row 2: [<<] [-] <step size> [+] [>>]  (step cycle button on ends)
+  if at(row) then
+    local step     = AUTO_STEPS[autoStepIndex]
+    local stepStr  = fmtStep(step)
+    -- Layout: "Step:[<<][-] 500FE/t [+][>>]"
+    -- [<<] cycles step down, [>>] cycles step up
+    -- [-] decreases target by step, [+] increases
+    local lblStr   = "Step:"
+    local cycDnLbl = "[<<]"
+    local minLbl   = "[-]"
+    local plusLbl  = "[+]"
+    local cycUpLbl = "[>>]"
+    local midStr   = " " .. stepStr .. "FE/t "
+
+    local x = 1
+    mon.setTextColor(colors.gray)
+    writeAt(mon, x, row, lblStr); x = x + #lblStr
+
+    mon.setTextColor(colors.cyan)
+    writeAt(mon, x, row, cycDnLbl)
+    addHit(monName, x, row, x + #cycDnLbl - 1, row, "step_down")
+    x = x + #cycDnLbl
+
     mon.setTextColor(colors.red)
-    writeAt(mon, minusX, row, "[-]")
-    addHit(monName, minusX, row, minusX+2, row, "auto_minus")
+    writeAt(mon, x, row, minLbl)
+    addHit(monName, x, row, x + #minLbl - 1, row, "auto_minus")
+    x = x + #minLbl
+
+    mon.setTextColor(colors.yellow)
+    writeAt(mon, x, row, midStr)
+    x = x + #midStr
+
+    mon.setTextColor(colors.lime)
+    writeAt(mon, x, row, plusLbl)
+    addHit(monName, x, row, x + #plusLbl - 1, row, "auto_plus")
+    x = x + #plusLbl
+
+    mon.setTextColor(colors.cyan)
+    writeAt(mon, x, row, cycUpLbl)
+    addHit(monName, x, row, x + #cycUpLbl - 1, row, "step_up")
   end
   row = row + 1
 
@@ -518,105 +572,126 @@ end
 -- ── draw: rods panel ──────────────────────────────────────────────────────────
 
 local function drawRods(mon, monName, startRow)
-  local w, h = mon.getSize()
+  local w, h     = mon.getSize()
   local rodCount = state.rodCount or 0
+  local autoOn   = cfg.autoMode == true
 
   -- Title
   if startRow <= h then
     mon.setTextColor(colors.yellow)
     mon.setCursorPos(1, startRow); mon.write("CONTROL RODS")
-    -- ALL ▲ ▼
-    local allUpLabel   = "[A+]"
-    local allDownLabel = "[A-]"
-    local ax = w - #allUpLabel - #allDownLabel - 1
-    mon.setTextColor(colors.lime)
-    writeAt(mon, ax, startRow, allUpLabel)
-    addHit(monName, ax, startRow, ax + #allUpLabel - 1, startRow, "all_rods_up")
-    mon.setTextColor(colors.red)
-    writeAt(mon, ax + #allUpLabel + 1, startRow, allDownLabel)
-    addHit(monName, ax + #allUpLabel + 1, startRow, w, startRow, "all_rods_down")
+
+    if autoOn then
+      -- Auto mode: show [> Manual] toggle on right
+      local lbl = "[> Manual]"
+      mon.setTextColor(colors.orange)
+      writeAt(mon, w - #lbl + 1, startRow, lbl)
+      addHit(monName, w - #lbl + 1, startRow, w, startRow, "toggle_auto")
+    else
+      -- Manual mode: [A+] [A-] all-rods + [> Auto] toggle
+      local autoLbl = "[> Auto]"
+      local allUpLbl = "[A+]"
+      local allDnLbl = "[A-]"
+      local autoX  = w - #autoLbl + 1
+      local allDnX = autoX - #allDnLbl - 1
+      local allUpX = allDnX - #allUpLbl - 1
+      mon.setTextColor(colors.lime)
+      writeAt(mon, allUpX, startRow, allUpLbl)
+      addHit(monName, allUpX, startRow, allUpX + #allUpLbl - 1, startRow, "all_rods_up")
+      mon.setTextColor(colors.red)
+      writeAt(mon, allDnX, startRow, allDnLbl)
+      addHit(monName, allDnX, startRow, allDnX + #allDnLbl - 1, startRow, "all_rods_down")
+      mon.setTextColor(colors.lime)
+      writeAt(mon, autoX, startRow, autoLbl)
+      addHit(monName, autoX, startRow, w, startRow, "toggle_auto")
+    end
   end
 
   local sepRow = startRow + 1
   if sepRow <= h then drawSep(mon, w, sepRow) end
 
-  -- Footer rows (sep + auto status)
+  -- Footer
   local footerSepRow = h - 1
   local footerRow    = h
   if footerSepRow > sepRow then drawSep(mon, w, footerSepRow) end
   if footerRow <= h then
-    local autoStr = cfg.autoMode and "Auto: MANAGING RODS" or "Manual mode"
-    local autoCol = cfg.autoMode and colors.yellow or colors.gray
-    mon.setTextColor(autoCol)
-    mon.setCursorPos(1, footerRow); mon.write(autoStr:sub(1, w))
-    -- scroll arrows
-    local scrollUpX   = w - 5
-    local scrollDownX = w - 2
-    -- stored for hit detection further down
-    addHit(monName, scrollUpX,   footerRow, scrollUpX+2,   footerRow, "rod_scroll_up")
-    addHit(monName, scrollDownX, footerRow, scrollDownX+2, footerRow, "rod_scroll_down")
+    if autoOn then
+      local tgt    = cfg.autoTarget or AUTO_TARGET_DEF
+      local rodPct = (state.rodLevels and state.rodLevels[0]) or 0
+      mon.setTextColor(colors.yellow)
+      mon.setCursorPos(1, footerRow)
+      mon.write(("Auto: %s tgt rods@%d%%"):format(fmtFEt(tgt), rodPct):sub(1, w - 6))
+    else
+      mon.setTextColor(colors.orange)
+      mon.setCursorPos(1, footerRow)
+      mon.write("Manual mode")
+    end
+    addHit(monName, w-5, footerRow, w-3, footerRow, "rod_scroll_up")
+    addHit(monName, w-2, footerRow, w,   footerRow, "rod_scroll_down")
   end
 
-  -- Content area for rods
+  -- Content area
   local contentStart = sepRow + 1
   local contentEnd   = footerSepRow > sepRow and footerSepRow - 1 or footerRow - 1
   local contentRows  = math.max(0, contentEnd - contentStart + 1)
 
-  -- Each rod entry: "Rod NN  45% [+][-]"
-  -- Determine column layout
-  -- Min rod entry width: "R00 100%[+][-]" = 14 chars; with spacing = 15
-  local entryW = 15
-  local cols   = math.max(1, math.floor(w / entryW))
-  -- Actual entry width evenly distributed
-  local colW   = math.floor(w / cols)
+  -- Column layout:
+  -- Entry = "R000 45%" = 8 chars (auto) or "R000 45%[+][-]" = 14 chars (manual)
+  -- Add 2-char gap between columns so labels never bleed into the next entry.
+  local entryW  = autoOn and 8 or 14
+  local gapW    = 2
+  local cols    = math.max(1, math.floor((w + gapW) / (entryW + gapW)))
+  local colW    = math.floor(w / cols)
 
   local rowsNeeded = math.ceil(rodCount / cols)
   local maxScroll  = math.max(0, rowsNeeded - contentRows)
   rodScrollOffset  = clamp(rodScrollOffset, 0, maxScroll)
 
-  -- Draw scroll arrows if needed
+  -- Scroll arrow active state
   if rowsNeeded > contentRows and footerRow <= h then
     mon.setTextColor(rodScrollOffset > 0 and colors.white or colors.gray)
-    writeAt(mon, w-5, footerRow, "[^]")
+    writeAt(mon, w - 5, footerRow, "[^]")
     mon.setTextColor(rodScrollOffset < maxScroll and colors.white or colors.gray)
-    writeAt(mon, w-2, footerRow, "[v]")
+    writeAt(mon, w - 2, footerRow, "[v]")
   end
 
+  -- Draw rod grid
   for rowIdx = 0, contentRows - 1 do
-    local gridRow  = rodScrollOffset + rowIdx
+    local gridRow   = rodScrollOffset + rowIdx
     local screenRow = contentStart + rowIdx
     if screenRow > contentEnd then break end
+
     for colIdx = 0, cols - 1 do
       local rodIdx = gridRow * cols + colIdx
       if rodIdx >= rodCount then break end
-      local level    = (state.rodLevels and state.rodLevels[rodIdx]) or 0
-      local xStart   = colIdx * colW + 1
-      -- Rod label
-      local rodLabel = string.format("R%02d", rodIdx)
-      local levelStr = string.format("%3d%%", level)
+
+      local level  = (state.rodLevels and state.rodLevels[rodIdx]) or 0
+      local xStart = colIdx * colW + 1
+
+      -- R000 label (4 chars)
       mon.setTextColor(colors.cyan)
-      writeAt(mon, xStart, screenRow, rodLabel)
-      -- Level bar colour: low insertion = more output = lime; high = red
+      writeAt(mon, xStart, screenRow, string.format("R%03d", rodIdx))
+
+      -- Level " 45%" — space + up to 3 digits + % = 5 chars at xStart+4
+      -- We write at xStart+4, giving colW-4 chars remaining before next col.
+      -- Use %3d so 100 stays 3 digits: " 45%", "100%"
       local lc = level < 40 and colors.lime or level < 75 and colors.yellow or colors.red
       mon.setTextColor(lc)
-      writeAt(mon, xStart + 4, screenRow, levelStr)
-      -- [+] [-] buttons
-      local plusX  = xStart + 9
-      local minusX = xStart + 12
-      if plusX + 2 <= xStart + colW - 1 and not cfg.autoMode then
-        mon.setTextColor(colors.lime)
-        writeAt(mon, plusX, screenRow, "[+]")
-        addHit(monName, plusX, screenRow, plusX+2, screenRow, "rod_up_"..rodIdx)
+      writeAt(mon, xStart + 4, screenRow, string.format("%3d%%", level))
+
+      -- [+][-] only in manual mode, starting right after the 8-char entry
+      if not autoOn then
+        local plusX  = xStart + 8
+        local minusX = xStart + 11
+        if plusX + 2 <= xStart + colW - 1 then
+          mon.setTextColor(colors.lime)
+          writeAt(mon, plusX, screenRow, "[+]")
+          addHit(monName, plusX, screenRow, plusX + 2, screenRow, "rod_up_" .. rodIdx)
+        end
         if minusX + 2 <= xStart + colW - 1 then
           mon.setTextColor(colors.red)
           writeAt(mon, minusX, screenRow, "[-]")
-          addHit(monName, minusX, screenRow, minusX+2, screenRow, "rod_down_"..rodIdx)
-        end
-      elseif cfg.autoMode then
-        -- gray out when auto managing
-        mon.setTextColor(colors.gray)
-        if plusX + 2 <= xStart + colW - 1 then
-          writeAt(mon, plusX, screenRow, "[+]")
+          addHit(monName, minusX, screenRow, minusX + 2, screenRow, "rod_down_" .. rodIdx)
         end
       end
     end
@@ -626,75 +701,115 @@ end
 -- ── draw: scram panel ─────────────────────────────────────────────────────────
 
 local function drawScram(mon, monName, startRow)
-  local w, h = mon.getSize()
-  local midH  = math.floor((startRow + h) / 2)
+  local w, h   = mon.getSize()
+  local rows   = h - startRow + 1  -- available rows
+  local row    = startRow
+
+  -- Helper: write a full-width button row
+  local function btnRow(r, label, bg, fg)
+    if r < startRow or r > h then return end
+    local pad  = math.max(0, w - #label)
+    local lpad = math.floor(pad / 2)
+    local rpad = pad - lpad
+    mon.setBackgroundColor(bg)
+    mon.setTextColor(fg)
+    mon.setCursorPos(1, r)
+    mon.write(string.rep(" ", lpad) .. label:sub(1, w) .. string.rep(" ", rpad))
+    mon.setBackgroundColor(colors.black)
+  end
 
   if scramPending then
-    -- Confirmation overlay
-    local title1 = "!! CONFIRM EMERGENCY !!"
-    local title2 = "REACTOR SHUTDOWN"
-    centered(mon, w, midH - 2, title1, colors.red)
-    centered(mon, w, midH - 1, title2, colors.orange)
+    -- Confirmation overlay — stack: warning / [CONFIRM] / gap? / [CANCEL]
+    -- Minimum 2 rows (confirm + cancel); add title rows if space permits
+    local confirmY = row + rows - 2  -- second-to-last row
+    local cancelY  = row + rows - 1  -- last row
 
-    -- CONFIRM button (full width, green)
-    local confirmY = midH + 1
-    local cancelY  = midH + 3
-    local btnW     = w - 4
+    -- Title rows if space allows
+    if rows >= 4 then
+      centered(mon, w, row,     "!! EMERGENCY !!",  colors.red)
+      centered(mon, w, row + 1, "SHUTDOWN REACTOR",  colors.orange)
+    elseif rows >= 3 then
+      centered(mon, w, row, "!! SHUTDOWN !!", colors.red)
+    end
 
-    mon.setBackgroundColor(colors.green)
-    mon.setTextColor(colors.white)
-    local confirmLabel = string.rep(" ", math.floor((btnW-9)/2)).."[CONFIRM]"..string.rep(" ", math.ceil((btnW-9)/2))
-    mon.setCursorPos(3, confirmY)
-    mon.write(confirmLabel:sub(1, btnW))
-    mon.setBackgroundColor(colors.black)
+    btnRow(confirmY, "[CONFIRM]", colors.green, colors.white)
     addHit(monName, 1, confirmY, w, confirmY, "scram_confirm")
 
-    mon.setBackgroundColor(colors.gray)
-    mon.setTextColor(colors.white)
-    local cancelLabel = string.rep(" ", math.floor((btnW-8)/2)).."[CANCEL]"..string.rep(" ", math.ceil((btnW-8)/2))
-    mon.setCursorPos(3, cancelY)
-    mon.write(cancelLabel:sub(1, btnW))
-    mon.setBackgroundColor(colors.black)
+    btnRow(cancelY, "[CANCEL]", colors.gray, colors.white)
     addHit(monName, 1, cancelY, w, cancelY, "scram_cancel")
 
   else
-    -- Normal SCRAM panel
-    local statusStr = state.active and "!! REACTOR ONLINE !!" or "-- REACTOR OFFLINE --"
-    local statusCol = state.active and colors.lime or colors.gray
-    centered(mon, w, midH - 2, statusStr, statusCol)
+    -- Normal SCRAM panel — stack top-to-bottom, show what fits
+    -- Always: [SCRAM!] button (most important)
+    -- If space: status line above, ON/OFF below
 
-    local outStr = state.active
-      and (cfg.coolingMode == "active"
-        and string.format("Output: %.0f mB/t", state.energyLastTick or 0)
-        or  "Output: "..fmtFEt(state.energyLastTick or 0))
-      or  "Output: ---"
-    centered(mon, w, midH - 1, outStr, colors.white)
+    local scramY = row   -- default: scram at top
 
-    -- Big SCRAM button
-    local scramY = midH + 1
-    local btnW   = w - 4
-    mon.setBackgroundColor(colors.red)
-    mon.setTextColor(colors.white)
-    local scramLabel = string.rep(" ", math.floor((btnW-8)/2)).."[SCRAM!]"..string.rep(" ", math.ceil((btnW-8)/2))
-    mon.setCursorPos(3, scramY)
-    mon.write(scramLabel:sub(1, btnW))
-    mon.setBackgroundColor(colors.black)
-    addHit(monName, 1, scramY, w, scramY, "scram_trigger")
+    if rows >= 4 then
+      -- status + output + SCRAM + ON/OFF
+      local statusStr = state.active and "REACTOR ONLINE" or "REACTOR OFFLINE"
+      local statusCol = state.active and colors.lime or colors.gray
+      centered(mon, w, row, statusStr, statusCol)
 
-    -- ON / OFF buttons below SCRAM
-    if scramY + 2 <= h then
+      local outStr = cfg.coolingMode == "active"
+        and string.format("%.0f mB/t", state.energyLastTick or 0)
+        or  fmtFEt(state.energyLastTick or 0)
+      centered(mon, w, row + 1, "Output: " .. outStr, colors.white)
+
+      scramY = row + 2
+
+      -- ON / OFF on last row
       local onLabel  = "[ON]"
       local offLabel = "[OFF]"
-      local spacing  = math.floor((w - #onLabel - #offLabel) / 3)
-      local onX      = spacing + 1
-      local offX     = onX + #onLabel + spacing
+      local onX  = math.floor(w / 4) - math.floor(#onLabel  / 2) + 1
+      local offX = math.floor(3 * w / 4) - math.floor(#offLabel / 2) + 1
       mon.setTextColor(state.active and colors.lime or colors.gray)
-      writeAt(mon, onX, scramY + 2, onLabel)
-      addHit(monName, onX, scramY+2, onX+#onLabel-1, scramY+2, "reactor_on")
+      writeAt(mon, onX,  h, onLabel)
+      addHit(monName, onX, h, onX + #onLabel - 1, h, "reactor_on")
       mon.setTextColor(state.active and colors.gray or colors.red)
-      writeAt(mon, offX, scramY + 2, offLabel)
-      addHit(monName, offX, scramY+2, offX+#offLabel-1, scramY+2, "reactor_off")
+      writeAt(mon, offX, h, offLabel)
+      addHit(monName, offX, h, offX + #offLabel - 1, h, "reactor_off")
+
+    elseif rows >= 3 then
+      -- status + SCRAM + ON/OFF
+      local statusStr = state.active and "ONLINE" or "OFFLINE"
+      local statusCol = state.active and colors.lime or colors.gray
+      centered(mon, w, row, statusStr, statusCol)
+      scramY = row + 1
+
+      local onLabel  = "[ON]"
+      local offLabel = "[OFF]"
+      local onX  = math.floor(w / 4) - math.floor(#onLabel  / 2) + 1
+      local offX = math.floor(3 * w / 4) - math.floor(#offLabel / 2) + 1
+      mon.setTextColor(state.active and colors.lime or colors.gray)
+      writeAt(mon, onX,  h, onLabel)
+      addHit(monName, onX, h, onX + #onLabel - 1, h, "reactor_on")
+      mon.setTextColor(state.active and colors.gray or colors.red)
+      writeAt(mon, offX, h, offLabel)
+      addHit(monName, offX, h, offX + #offLabel - 1, h, "reactor_off")
+
+    elseif rows >= 2 then
+      -- SCRAM + ON/OFF, no status
+      scramY = row
+      local onLabel  = "[ON]"
+      local offLabel = "[OFF]"
+      local onX  = math.floor(w / 4) - math.floor(#onLabel  / 2) + 1
+      local offX = math.floor(3 * w / 4) - math.floor(#offLabel / 2) + 1
+      mon.setTextColor(state.active and colors.lime or colors.gray)
+      writeAt(mon, onX,  h, onLabel)
+      addHit(monName, onX, h, onX + #onLabel - 1, h, "reactor_on")
+      mon.setTextColor(state.active and colors.gray or colors.red)
+      writeAt(mon, offX, h, offLabel)
+      addHit(monName, offX, h, offX + #offLabel - 1, h, "reactor_off")
     end
+
+    -- SCRAM button fills from scramY to h-1 (or just scramY if only 1 row left)
+    local scramRows = math.max(1, h - scramY - (rows >= 2 and 1 or 0))
+    for r = scramY, scramY + scramRows - 1 do
+      btnRow(r, r == scramY and "[SCRAM!]" or "", colors.red, colors.white)
+    end
+    -- register hit for all scram rows
+    addHit(monName, 1, scramY, w, scramY + scramRows - 1, "scram_trigger")
   end
 end
 
@@ -750,7 +865,7 @@ local function drawAll()
         m.mon.setTextColor(colors.gray)
         local w = m.mon.getSize()
         centered(m.mon, w, 2, "Not assigned", colors.gray)
-        centered(m.mon, w, 3, "Run: reactor setup", colors.gray)
+        centered(m.mon, w, 3, "Run: reactor_monitor setup", colors.gray)
       end
     end
   end
@@ -773,22 +888,34 @@ local function handleAction(action)
     playSound(cfg.autoMode and SND_ON or SND_OFF)
 
   elseif action == "auto_plus" then
-    cfg.autoTarget = (cfg.autoTarget or AUTO_TARGET_DEF) + 500
+    local step = AUTO_STEPS[autoStepIndex]
+    cfg.autoTarget = (cfg.autoTarget or AUTO_TARGET_DEF) + step
     saveCfg()
     playSound(SND_ROD)
 
   elseif action == "auto_minus" then
-    cfg.autoTarget = math.max(0, (cfg.autoTarget or AUTO_TARGET_DEF) - 500)
+    local step = AUTO_STEPS[autoStepIndex]
+    cfg.autoTarget = math.max(0, (cfg.autoTarget or AUTO_TARGET_DEF) - step)
     saveCfg()
     playSound(SND_ROD)
 
+  elseif action == "step_up" then
+    autoStepIndex = (autoStepIndex % #AUTO_STEPS) + 1
+    playSound(SND_ROD)
+
+  elseif action == "step_down" then
+    autoStepIndex = ((autoStepIndex - 2) % #AUTO_STEPS) + 1
+    playSound(SND_ROD)
+
   elseif action == "all_rods_up" then
+    -- [A+] = more output = withdraw rods = decrease insertion
     if cfg.autoMode then cfg.autoMode = false; saveCfg() end
     local lvl = state.rodLevels and state.rodLevels[0] or 50
     pcall(reactor.setAllControlRodLevels, clamp(lvl - ROD_STEP, 0, 100))
     playSound(SND_ROD)
 
   elseif action == "all_rods_down" then
+    -- [A-] = less output = insert rods = increase insertion
     if cfg.autoMode then cfg.autoMode = false; saveCfg() end
     local lvl = state.rodLevels and state.rodLevels[0] or 50
     pcall(reactor.setAllControlRodLevels, clamp(lvl + ROD_STEP, 0, 100))
@@ -801,6 +928,7 @@ local function handleAction(action)
     rodScrollOffset = rodScrollOffset + 1  -- clamped in drawRods
 
   elseif action:sub(1, 7) == "rod_up_" then
+    -- [+] = more output = withdraw rod = decrease insertion
     if cfg.autoMode then cfg.autoMode = false; saveCfg() end
     local idx = tonumber(action:sub(8))
     if idx then
@@ -810,6 +938,7 @@ local function handleAction(action)
     end
 
   elseif action:sub(1, 9) == "rod_down_" then
+    -- [-] = less output = insert rod = increase insertion
     if cfg.autoMode then cfg.autoMode = false; saveCfg() end
     local idx = tonumber(action:sub(10))
     if idx then
@@ -856,11 +985,12 @@ local function runSetup()
   print("Speaker: "..(speaker and "found" or "not found"))
   print("")
 
-  -- List monitors
+  -- List monitors (loop until at least one is found)
   local mons = getMonitors()
-  if #mons == 0 then
-    printError("No monitors found! Attach at least one Advanced Monitor.")
-    return false
+  while #mons == 0 do
+    printError("No monitors found! Attach an Advanced Monitor and press Enter to retry.")
+    read()
+    mons = getMonitors()
   end
 
   print("Monitors detected:")
@@ -901,16 +1031,16 @@ local function runSetup()
   if modeIn == "a" then newCfg.coolingMode = "active"
   else newCfg.coolingMode = "passive" end
 
-  -- Auto-rod target
+  -- Auto-rod target (default enabled)
   io.write("Auto-rod target FE/t [0=disabled, default="..AUTO_TARGET_DEF.."]: ")
   local tgtIn = read()
   local tgt = tonumber(tgtIn)
-  if tgt and tgt > 0 then
-    newCfg.autoTarget = tgt
-    newCfg.autoMode   = true
-  else
+  if tgt and tgt == 0 then
     newCfg.autoTarget = AUTO_TARGET_DEF
     newCfg.autoMode   = false
+  else
+    newCfg.autoTarget = (tgt and tgt > 0) and tgt or AUTO_TARGET_DEF
+    newCfg.autoMode   = true   -- on by default
   end
 
   cfg = newCfg
@@ -987,9 +1117,15 @@ end
 -- Reload cfg (may have been written by setup)
 cfg = loadTable(CFG_FILE, {
   coolingMode = "passive",
-  autoMode    = false,
+  autoMode    = true,
   autoTarget  = AUTO_TARGET_DEF,
 })
+
+-- Migrate: if cfg exists but autoMode was never set, default to true
+if cfg.autoMode == nil then
+  cfg.autoMode = true
+  saveCfg()
+end
 
 -- ── main event loop ───────────────────────────────────────────────────────────
 
