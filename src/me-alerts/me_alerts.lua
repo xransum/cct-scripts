@@ -774,10 +774,18 @@ local function drawHelp()
   mon.setTextColor(colors.gray)
   mon.setCursorPos(1, h - 1)
   mon.write(string.rep("-", w))
+  local hint   = "* Tap items to edit thresholds"
   local credit = "-- github.com/xransum"
-  mon.setTextColor(colors.cyan)
-  mon.setCursorPos(math.max(1, math.floor((w - #credit) / 2) + 1), h)
-  mon.write(credit)
+  if h >= 4 then
+    -- hint on h, credit not shown (hint is more useful)
+    mon.setTextColor(colors.red)
+    mon.setCursorPos(math.max(1, math.floor((w - #hint) / 2) + 1), h)
+    mon.write(hint:sub(1, w))
+  else
+    mon.setTextColor(colors.cyan)
+    mon.setCursorPos(math.max(1, math.floor((w - #credit) / 2) + 1), h)
+    mon.write(credit)
+  end
 end
 
 local function drawMonitor()
