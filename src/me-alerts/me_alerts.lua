@@ -318,22 +318,23 @@ local function drawList()
   mon.write(" + ADD ")
   addButtonRow = h
 
-  -- Search hint centered between ADD and CLEAR ALL (show when gap is wide enough)
-  local gapStart = 10    -- first col after ADD button + 1 space
-  local gapEnd   = w - 13  -- last col before CLEAR ALL + 1 space
-  local gapW     = gapEnd - gapStart + 1
-  local hint     = "search: terminal"
-  local shortHint = "search?"
-  if gapW >= #hint then
+  -- Search/tap hint centered between ADD and CLEAR ALL
+  local gapStart  = 10
+  local gapEnd    = w - 13
+  local gapW      = gapEnd - gapStart + 1
+  local tapHint   = "* tap item to edit"
+  local shortHint = "* tap to edit"
+  local tinyHint  = "* tap"
+  local txt = nil
+  if gapW >= #tapHint   then txt = tapHint
+  elseif gapW >= #shortHint then txt = shortHint
+  elseif gapW >= #tinyHint  then txt = tinyHint
+  end
+  if txt then
     mon.setBackgroundColor(colors.black)
-    mon.setTextColor(colors.gray)
-    mon.setCursorPos(gapStart + math.floor((gapW - #hint) / 2), h)
-    mon.write(hint)
-  elseif gapW >= #shortHint then
-    mon.setBackgroundColor(colors.black)
-    mon.setTextColor(colors.gray)
-    mon.setCursorPos(gapStart + math.floor((gapW - #shortHint) / 2), h)
-    mon.write(shortHint)
+    mon.setTextColor(colors.red)
+    mon.setCursorPos(gapStart + math.floor((gapW - #txt) / 2), h)
+    mon.write(txt)
   end
 
   mon.setCursorPos(w - 11, h)
@@ -774,18 +775,10 @@ local function drawHelp()
   mon.setTextColor(colors.gray)
   mon.setCursorPos(1, h - 1)
   mon.write(string.rep("-", w))
-  local hint   = "* Tap items to edit thresholds"
   local credit = "-- github.com/xransum"
-  if h >= 4 then
-    -- hint on h, credit not shown (hint is more useful)
-    mon.setTextColor(colors.red)
-    mon.setCursorPos(math.max(1, math.floor((w - #hint) / 2) + 1), h)
-    mon.write(hint:sub(1, w))
-  else
-    mon.setTextColor(colors.cyan)
-    mon.setCursorPos(math.max(1, math.floor((w - #credit) / 2) + 1), h)
-    mon.write(credit)
-  end
+  mon.setTextColor(colors.cyan)
+  mon.setCursorPos(math.max(1, math.floor((w - #credit) / 2) + 1), h)
+  mon.write(credit)
 end
 
 local function drawMonitor()
