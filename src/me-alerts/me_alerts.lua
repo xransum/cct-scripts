@@ -111,7 +111,7 @@ local cachedItems = {}   -- [{name, label, count}]
 
 -- mode controls which screen is drawn and how touch events are handled
 local mode = "list"
--- "list" | "picker" | "numpad" | "edit_menu" | "confirm_del" | "help"
+-- "list" | "picker" | "numpad" | "edit_menu" | "confirm_del" | "confirm_clear" | "help"
 
 -- Picker
 local pickerPage   = 1
@@ -134,6 +134,8 @@ local anyAlerting = false
 -- Row hit-detection tables (repopulated on each draw)
 local itemRows      = {}   -- [row] = watchlist index
 local pickerRowMap  = {}   -- [row] = item object (from filtered list)
+local pickerClearFilterRow = nil   -- row of [X] clear-filter button (nil when no filter)
+local pickerClearFilterX   = nil   -- starting col of [X] button
 local addButtonRow, clearButtonRow
 local prevPageRow, nextPageRow, pickerCancelRow
 local pickerTotalPages = 1   -- saved by drawPicker so touch handler uses correct value
@@ -141,6 +143,7 @@ local numpadGrid    = {}   -- [row][col] = button value string
 local numpadStartRow, numpadCancelRow
 local editRows      = {}   -- [row] = "threshold"|"delete"|"cancel"
 local yesDelRow, noDelRow
+local yesClearRow, noClearRow
 local helpButtonRow, helpButtonX
 
 -- ── watchlist save/load ───────────────────────────────────────────────────────
@@ -304,7 +307,26 @@ local function drawList()
   mon.write(" + ADD ")
   addButtonRow = h
 
+  -- Search hint centered between ADD and CLEAR ALL (show when gap is wide enough)
+  local gapStart = 10    -- first col after ADD button + 1 space
+  local gapEnd   = w - 13  -- last col before CLEAR ALL + 1 space
+  local gapW     = gapEnd - gapStart + 1
+  local hint     = "search: terminal"
+  local shortHint = "search?"
+  if gapW >= #hint then
+    mon.setBackgroundColor(colors.black)
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(gapStart + math.floor((gapW - #hint) / 2), h)
+    mon.write(hint)
+  elseif gapW >= #shortHint then
+    mon.setBackgroundColor(colors.black)
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(gapStart + math.floor((gapW - #shortHint) / 2), h)
+    mon.write(shortHint)
+  end
+
   mon.setCursorPos(w - 11, h)
+  mon.setBackgroundColor(colors.gray)
   mon.write(" CLEAR ALL ")
   clearButtonRow = h
 
@@ -313,7 +335,9 @@ end
 
 local function drawPicker()
   local w, h = mon.getSize()
-  pickerRowMap = {}
+  pickerRowMap           = {}
+  pickerClearFilterRow   = nil
+  pickerClearFilterX     = nil
 
   -- Apply search filter
   local filtered = {}
@@ -338,17 +362,31 @@ local function drawPicker()
 
   local startIdx = (pickerPage - 1) * pageSize + 1
 
-  -- Title + filter indicator
+  -- Title + filter indicator + [X] clear button
   mon.setTextColor(colors.yellow)
   mon.setCursorPos(1, 1)
   mon.write("SELECT ITEM")
-  if pickerFilter ~= "" then
-    local fStr = ' "' .. pickerFilter .. '"'
-    mon.setTextColor(colors.orange)
-    mon.setCursorPos(12, 1)
-    mon.write(truncate(fStr, w - 11 - #tostring(totalPages) * 2 - 4))
-  end
   local pgStr = ("pg %d/%d"):format(pickerPage, totalPages)
+  if pickerFilter ~= "" then
+    -- Layout row 1: SELECT ITEM  "filter" [X]  pg N/M
+    -- [X] sits between filter text and pgStr with one-space gaps on each side
+    local clearX   = w - #pgStr - 1 - 3   -- [X] is 3 chars; 1 space gap before pgStr
+    local filterX  = 13
+    local filterMax = math.max(0, clearX - filterX - 1)  -- 1 space gap before [X]
+    if filterMax > 0 then
+      mon.setTextColor(colors.orange)
+      mon.setCursorPos(filterX, 1)
+      mon.write(truncate('"' .. pickerFilter .. '"', filterMax))
+    end
+    -- [X] button on orange background
+    mon.setBackgroundColor(colors.orange)
+    mon.setTextColor(colors.black)
+    mon.setCursorPos(clearX, 1)
+    mon.write("[X]")
+    mon.setBackgroundColor(colors.black)
+    pickerClearFilterRow = 1
+    pickerClearFilterX   = clearX
+  end
   mon.setTextColor(colors.gray)
   mon.setCursorPos(w - #pgStr + 1, 1)
   mon.write(pgStr)
@@ -570,6 +608,37 @@ local function drawConfirmDel()
   mon.setBackgroundColor(colors.black)
 end
 
+local function drawConfirmClearAll()
+  local w, h = mon.getSize()
+  local midH = math.floor(h / 2)
+  local count = #watchlist
+
+  mon.setTextColor(colors.red)
+  local msg = "Clear ALL alerts?"
+  mon.setCursorPos(math.floor((w - #msg) / 2) + 1, midH - 2)
+  mon.write(msg)
+
+  mon.setTextColor(colors.gray)
+  local sub = ("(" .. count .. " item" .. (count == 1 and "" or "s") .. ")")
+  mon.setCursorPos(math.floor((w - #sub) / 2) + 1, midH - 1)
+  mon.write(sub)
+
+  local yesText = "[ YES, CLEAR ALL ]"
+  mon.setBackgroundColor(colors.red)
+  mon.setTextColor(colors.white)
+  yesClearRow = midH + 1
+  mon.setCursorPos(math.max(1, math.floor((w - #yesText) / 2) + 1), yesClearRow)
+  mon.write(yesText)
+
+  local noText = "[    CANCEL     ]"
+  mon.setBackgroundColor(colors.gray)
+  noClearRow = midH + 2
+  mon.setCursorPos(math.max(1, math.floor((w - #noText) / 2) + 1), noClearRow)
+  mon.write(noText)
+
+  mon.setBackgroundColor(colors.black)
+end
+
 local function drawHelp()
   local w, h = mon.getSize()
   local row   = 3
@@ -634,12 +703,13 @@ end
 local function drawMonitor()
   mon.setBackgroundColor(colors.black)
   mon.clear()
-  if     mode == "list"        then drawList()
-  elseif mode == "picker"      then drawPicker()
-  elseif mode == "numpad"      then drawNumpad()
-  elseif mode == "edit_menu"   then drawEditMenu()
-  elseif mode == "confirm_del" then drawConfirmDel()
-  elseif mode == "help"        then drawHelp()
+  if     mode == "list"          then drawList()
+  elseif mode == "picker"        then drawPicker()
+  elseif mode == "numpad"        then drawNumpad()
+  elseif mode == "edit_menu"     then drawEditMenu()
+  elseif mode == "confirm_del"   then drawConfirmDel()
+  elseif mode == "confirm_clear" then drawConfirmClearAll()
+  elseif mode == "help"          then drawHelp()
   end
 end
 
@@ -712,17 +782,11 @@ local function handleTouch(x, y)
       return
     end
 
-    -- CLEAR ALL
+    -- CLEAR ALL → confirm screen
     if y == clearButtonRow and x >= (w - 11) then
       if #watchlist > 0 then
-        -- Reuse confirm_del screen with index 0 = clear all sentinel
-        -- Instead: wipe entire list with a simple confirm inline (tap CLEAR again = confirm)
-        -- For simplicity: immediate clear (user can re-add)
-        watchlist = {}
-        alertState = {}
-        saveWatchlist()
+        mode = "confirm_clear"
         drawMonitor()
-        playSound("bass", 2, 4)
       end
       return
     end
@@ -747,7 +811,15 @@ local function handleTouch(x, y)
   end
 
   if mode == "picker" then
-    -- All three buttons share the same bottom row (h).
+    -- [X] clear-filter button (row 1, only when filter active)
+    if pickerClearFilterRow and y == pickerClearFilterRow
+       and pickerClearFilterX and x >= pickerClearFilterX and x <= pickerClearFilterX + 2 then
+      pickerFilter = ""
+      pickerPage   = 1
+      drawMonitor()
+      return
+    end
+    -- All three footer buttons share the same bottom row (h).
     -- Distinguish them by x position: PREV is left, NEXT is right, CANCEL is centre.
     if y == prevPageRow then
       local prevText = "< PREV"
@@ -857,6 +929,21 @@ local function handleTouch(x, y)
       drawMonitor()
       playSound("bass", 2, 4)
     elseif y == noDelRow then
+      mode = "list"; drawMonitor()
+      playSound("hat", 1, 6)
+    end
+    return
+  end
+
+  if mode == "confirm_clear" then
+    if y == yesClearRow then
+      watchlist  = {}
+      alertState = {}
+      saveWatchlist()
+      mode = "list"
+      drawMonitor()
+      playSound("bass", 2, 4)
+    elseif y == noClearRow then
       mode = "list"; drawMonitor()
       playSound("hat", 1, 6)
     end
