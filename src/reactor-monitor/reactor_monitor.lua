@@ -1,0 +1,1025 @@
+-- reactor_monitor.lua
+-- CC:Tweaked: Extreme Reactors 2 monitor & control system.
+-- Supports 1–N Advanced Monitors with adaptive single-monitor tab mode.
+-- Panels: Dashboard (stats+control), Rods (per-rod insertion), SCRAM (emergency).
+-- Auto-rod mode adjusts all rods to hit a target FE/t setpoint.
+-- Speaker support for sound feedback (optional).
+--
+-- Usage:
+--   reactor_monitor           start normally
+--   reactor_monitor setup     re-run interactive configurator
+--   reactor_monitor status    dump stats to terminal
+--   reactor_monitor scram     emergency shutdown from terminal
+--   reactor_monitor on|off    turn reactor on/off from terminal
+--   reactor_monitor rods <N>  set all rods to N% (0-100)
+--   reactor_monitor mode passive|active
+
+-- ── constants ─────────────────────────────────────────────────────────────────
+
+local CFG_FILE        = "reactor_monitor.cfg"
+local DRAW_INTERVAL   = 2    -- seconds between redraws
+local AUTO_INTERVAL   = 5    -- seconds between auto-rod adjustments
+local ROD_STEP        = 5    -- % per tap or auto-step (fine)
+local ROD_STEP_FAST   = 5    -- % per auto-step (coarse, large error)
+local AUTO_TARGET_DEF = 10000
+local SCRAM_ROD_LEVEL = 100
+local MAX_ROD_AUTO    = 95   -- auto never exceeds this; 100 reserved for SCRAM
+
+-- Sound events (speaker.playSoundEffect)
+local SND_SCRAM     = "actuallyadditions:duh_duh_duh_duuuh"
+local SND_ALARM     = "mekanism:tile.machine.industrial_alarm"
+local SND_ON        = "create:confirm_2"
+local SND_OFF       = "create:deny"
+local SND_ROD       = "create:scroll_value"
+local SND_CONFIRM   = "create:confirm"
+
+-- Panel identifiers
+local PANEL_DASHBOARD = "dashboard"
+local PANEL_RODS      = "rods"
+local PANEL_SCRAM     = "scram"
+local PANELS          = { PANEL_DASHBOARD, PANEL_RODS, PANEL_SCRAM }
+
+-- ── peripherals ───────────────────────────────────────────────────────────────
+
+local reactor = peripheral.find("extremereactor-reactorComputerPort")
+if not reactor then
+  error("No Extreme Reactors computer port found. Attach or wire one to this computer.")
+end
+
+local speaker = peripheral.find("speaker")
+
+local function playSound(snd, vol, pitch)
+  if speaker then
+    pcall(speaker.playSoundEffect, snd, vol or 1.0, pitch or 1.0)
+  end
+end
+
+-- ── helpers ───────────────────────────────────────────────────────────────────
+
+local function saveTable(path, data)
+  local f = fs.open(path, "w")
+  f.write(textutils.serialize(data))
+  f.close()
+end
+
+local function loadTable(path, default)
+  if not fs.exists(path) then return default end
+  local f = fs.open(path, "r")
+  local raw = f.readAll(); f.close()
+  local ok, t = pcall(textutils.unserialize, raw)
+  return (ok and type(t) == "table") and t or default
+end
+
+local function fmtNum(n)
+  -- thousands separator
+  local s = tostring(math.floor(n))
+  local result = ""
+  local cnt = 0
+  for i = #s, 1, -1 do
+    if cnt > 0 and cnt % 3 == 0 then result = "," .. result end
+    result = s:sub(i,i) .. result
+    cnt = cnt + 1
+  end
+  return result
+end
+
+local function fmtFE(n)
+  if n >= 1e9 then return string.format("%.1fGFE", n/1e9)
+  elseif n >= 1e6 then return string.format("%.1fMFE", n/1e6)
+  elseif n >= 1e3 then return string.format("%.1fkFE", n/1e3)
+  else return fmtNum(n).."FE" end
+end
+
+local function fmtFEt(n)
+  if n >= 1e6 then return string.format("%.1fMFE/t", n/1e6)
+  elseif n >= 1e3 then return string.format("%.1fkFE/t", n/1e3)
+  else return fmtNum(n).."FE/t" end
+end
+
+local function bar(filled, total, width)
+  local n = total > 0 and math.floor(filled / total * width) or 0
+  n = math.max(0, math.min(width, n))
+  return string.rep("\x8f", n) .. string.rep("-", width - n)
+end
+
+local function pct(a, b)
+  if b == 0 then return 0 end
+  return math.floor(a / b * 100)
+end
+
+local function tempColor(t)
+  if t < 500  then return colors.lime
+  elseif t < 1000 then return colors.yellow
+  elseif t < 1500 then return colors.orange
+  else return colors.red end
+end
+
+local function clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
+
+-- Collect all monitors, return sorted list of {name, mon} pairs
+local function getMonitors()
+  local list = {}
+  local names = peripheral.getNames()
+  table.sort(names)
+  for _, name in ipairs(names) do
+    if peripheral.getType(name) == "monitor" then
+      list[#list+1] = { name = name, mon = peripheral.wrap(name) }
+    end
+  end
+  return list
+end
+
+-- ── config ────────────────────────────────────────────────────────────────────
+
+local cfg = loadTable(CFG_FILE, {})
+
+local function saveCfg()
+  saveTable(CFG_FILE, cfg)
+end
+
+-- ── reactor state (polled every DRAW_INTERVAL) ────────────────────────────────
+
+local state = {}
+
+local function pollReactor()
+  local ok, err = pcall(function()
+    state.active         = reactor.getActive()
+    state.fuelTemp       = reactor.getFuelTemperature()
+    state.casingTemp     = reactor.getCasingTemperature()
+    state.fuelAmt        = reactor.getFuelAmount()
+    state.fuelMax        = reactor.getFuelAmountMax()
+    state.wasteAmt       = reactor.getWasteAmount()
+    state.energyStored   = reactor.getEnergyStored()
+    state.energyCap      = reactor.getEnergyCapacity()
+    state.reactivity     = reactor.getFuelReactivity()
+    state.fuelConsumed   = reactor.getFuelConsumedLastTick()
+    state.rodCount       = reactor.getNumberOfControlRods()
+    state.activeCooled   = reactor.isActivelyCooled()
+    if state.activeCooled then
+      state.energyLastTick = reactor.getHotFluidProducedLastTick()
+    else
+      state.energyLastTick = reactor.getEnergyProducedLastTick()
+    end
+    -- Rod levels
+    state.rodLevels = state.rodLevels or {}
+    for i = 0, state.rodCount - 1 do
+      state.rodLevels[i] = reactor.getControlRodLevel(i)
+    end
+  end)
+  if not ok then
+    state.error = tostring(err)
+  else
+    state.error = nil
+  end
+end
+
+-- ── auto-rod controller ───────────────────────────────────────────────────────
+
+local function autoAdjustRods()
+  if not cfg.autoMode or not cfg.autoTarget then return end
+  if not state.active or state.error then return end
+  local current = state.energyLastTick or 0
+  local target  = cfg.autoTarget
+  local err     = current - target
+  local delta   = 0
+  if     err >  2000 then delta = -ROD_STEP_FAST
+  elseif err >   500 then delta = -ROD_STEP
+  elseif err < -2000 then delta =  ROD_STEP_FAST
+  elseif err <  -500 then delta =  ROD_STEP
+  end
+  if delta ~= 0 then
+    local current_level = state.rodLevels and state.rodLevels[0] or 50
+    local new_level = clamp(current_level + delta, 0, MAX_ROD_AUTO)
+    pcall(reactor.setAllControlRodLevels, new_level)
+  end
+end
+
+-- ── monitor assignment helpers ────────────────────────────────────────────────
+
+-- Returns the peripheral object for a panel, or nil if not assigned/missing
+local function panelMon(panel)
+  local name = cfg[panel]
+  if not name then return nil end
+  if not peripheral.isPresent(name) then return nil end
+  local t = peripheral.getType(name)
+  if t ~= "monitor" then return nil end
+  return peripheral.wrap(name)
+end
+
+-- Determine if we're in single-monitor tab mode
+-- Returns the single monitor object if tab mode, nil otherwise
+local function singleTabMon()
+  local assigned = {}
+  for _, p in ipairs(PANELS) do
+    local name = cfg[p]
+    if name and peripheral.isPresent(name) then
+      assigned[name] = true
+    end
+  end
+  local count = 0
+  local mon = nil
+  for name, _ in pairs(assigned) do
+    count = count + 1
+    mon = peripheral.wrap(name)
+  end
+  -- Also check if no assignments exist but exactly one monitor is present
+  if count == 0 then
+    local mons = getMonitors()
+    if #mons == 1 then return mons[1].mon end
+    return nil
+  end
+  if count == 1 then return mon end
+  return nil
+end
+
+-- ── SCRAM state ───────────────────────────────────────────────────────────────
+
+local scramPending    = false   -- waiting for confirmation tap
+local scramMonitor    = nil     -- which monitor is showing the confirm overlay
+local alarmTimer      = nil     -- repeating alarm while confirm pending
+
+local function executeScram()
+  pcall(reactor.setActive, false)
+  pcall(reactor.setAllControlRodLevels, SCRAM_ROD_LEVEL)
+  playSound(SND_SCRAM, 1.0, 1.0)
+  scramPending = false
+  alarmTimer   = nil
+end
+
+local function cancelScram()
+  scramPending = false
+  alarmTimer   = nil
+end
+
+-- ── tab state (single-monitor mode) ──────────────────────────────────────────
+
+local tabIndex = 1   -- 1=dashboard, 2=rods, 3=scram
+local TAB_LABELS = { "Dashboard", "Rods", "SCRAM" }
+
+-- ── rod panel scroll state ────────────────────────────────────────────────────
+
+local rodScrollOffset = 0
+
+-- ── draw: shared primitives ───────────────────────────────────────────────────
+
+local function clearMon(mon)
+  mon.setBackgroundColor(colors.black)
+  mon.setTextColor(colors.white)
+  mon.clear()
+end
+
+local function drawSep(mon, w, r)
+  mon.setTextColor(colors.gray)
+  mon.setCursorPos(1, r)
+  mon.write(string.rep("-", w))
+end
+
+local function writeAt(mon, x, y, text, fg, bg)
+  mon.setCursorPos(x, y)
+  if fg  then mon.setTextColor(fg) end
+  if bg  then mon.setBackgroundColor(bg) end
+  mon.write(text)
+  mon.setBackgroundColor(colors.black)
+end
+
+local function centered(mon, w, y, text, fg)
+  local x = math.max(1, math.floor((w - #text) / 2) + 1)
+  writeAt(mon, x, y, text:sub(1,w), fg or colors.white)
+end
+
+-- ── touch hitbox registry (per-monitor, rebuilt each draw) ────────────────────
+-- hitboxes[monName] = list of {x1,y1,x2,y2,action}
+
+local hitboxes = {}
+
+local function clearHitboxes(monName)
+  hitboxes[monName] = {}
+end
+
+local function addHit(monName, x1, y1, x2, y2, action)
+  local t = hitboxes[monName] or {}
+  t[#t+1] = {x1=x1, y1=y1, x2=x2, y2=y2, action=action}
+  hitboxes[monName] = t
+end
+
+local function hitTest(monName, x, y)
+  local t = hitboxes[monName] or {}
+  for _, h in ipairs(t) do
+    if x >= h.x1 and x <= h.x2 and y >= h.y1 and y <= h.y2 then
+      return h.action
+    end
+  end
+end
+
+-- ── draw: tab strip (single-monitor mode) ─────────────────────────────────────
+
+local function drawTabStrip(mon, monName, w)
+  mon.setBackgroundColor(colors.black)
+  mon.setCursorPos(1, 1)
+  mon.write(string.rep(" ", w))
+  local col = 1
+  for i, label in ipairs(TAB_LABELS) do
+    local tag = "["..label.."]"
+    if col + #tag - 1 > w then break end
+    if i == tabIndex then
+      mon.setBackgroundColor(colors.gray)
+      mon.setTextColor(colors.yellow)
+    else
+      mon.setBackgroundColor(colors.black)
+      mon.setTextColor(colors.gray)
+    end
+    writeAt(mon, col, 1, tag)
+    addHit(monName, col, 1, col + #tag - 1, 1, "tab_"..i)
+    col = col + #tag + 1
+  end
+  mon.setBackgroundColor(colors.black)
+  drawSep(mon, w, 2)
+end
+
+-- ── draw: dashboard panel ─────────────────────────────────────────────────────
+
+local function drawDashboard(mon, monName, startRow)
+  local w, h = mon.getSize()
+  local row = startRow
+
+  local function at(r) return row <= r and r <= h end
+  local function sep(r) if at(r) then drawSep(mon, w, r) end end
+
+  -- Title row
+  if at(row) then
+    mon.setTextColor(colors.yellow)
+    mon.setCursorPos(1, row)
+    mon.write("REACTOR MONITOR")
+    -- ON / OFF button
+    local onLabel  = "[ON]"
+    local offLabel = "[OFF]"
+    local btnX = w - #offLabel - #onLabel - 1
+    mon.setTextColor(state.active and colors.lime or colors.gray)
+    writeAt(mon, btnX, row, onLabel)
+    addHit(monName, btnX, row, btnX + #onLabel - 1, row, "reactor_on")
+    mon.setTextColor(state.active and colors.gray or colors.red)
+    writeAt(mon, btnX + #onLabel + 1, row, offLabel)
+    addHit(monName, btnX + #onLabel + 1, row, w, row, "reactor_off")
+  end
+  row = row + 1
+  sep(row); row = row + 1
+
+  -- Status + mode
+  if at(row) then
+    local statusStr = state.active and "ONLINE" or "OFFLINE"
+    local statusCol = state.active and colors.lime or colors.red
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(1, row); mon.write("Status:")
+    mon.setTextColor(statusCol)
+    mon.setCursorPos(9, row); mon.write(statusStr)
+    local coolingMode = cfg.coolingMode or "passive"
+    local modeStr = "Mode: "..(coolingMode == "active" and "Active" or "Passive")
+    mon.setTextColor(colors.cyan)
+    local mx = w - #modeStr + 1
+    mon.setCursorPos(mx, row); mon.write(modeStr)
+  end
+  row = row + 1
+  sep(row); row = row + 1
+
+  -- Fuel bar
+  if at(row) then
+    local fp = pct(state.fuelAmt or 0, state.fuelMax or 1)
+    local barW = math.max(4, w - 20)
+    local fuelBar = bar(state.fuelAmt or 0, state.fuelMax or 1, barW)
+    local fuelStr = string.format("Fuel:  [%s] %d%%", fuelBar, fp)
+    local amtStr  = string.format("%d/%d mB", state.fuelAmt or 0, state.fuelMax or 0)
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write("Fuel: ")
+    local col = fp > 30 and colors.lime or fp > 10 and colors.yellow or colors.red
+    mon.setTextColor(col)
+    mon.setCursorPos(7, row)
+    local bw = w - 6 - #amtStr - 1
+    if bw > 2 then
+      mon.write("[" .. bar(state.fuelAmt or 0, state.fuelMax or 1, bw) .. "]")
+    end
+    mon.setTextColor(colors.white)
+    mon.setCursorPos(w - #amtStr + 1, row); mon.write(amtStr)
+  end
+  row = row + 1
+
+  -- Waste bar
+  if at(row) then
+    local wp = pct(state.wasteAmt or 0, state.fuelMax or 1)
+    local amtStr = string.format("%d mB (%d%%)", state.wasteAmt or 0, wp)
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write("Waste:")
+    local col = wp < 20 and colors.lime or wp < 50 and colors.yellow or colors.red
+    mon.setTextColor(col)
+    local bw = w - 7 - #amtStr - 1
+    mon.setCursorPos(7, row)
+    if bw > 2 then
+      mon.write("[" .. bar(state.wasteAmt or 0, state.fuelMax or 1, bw) .. "]")
+    end
+    mon.setTextColor(colors.white)
+    mon.setCursorPos(w - #amtStr + 1, row); mon.write(amtStr)
+  end
+  row = row + 1
+  sep(row); row = row + 1
+
+  -- Temperatures + reactivity
+  if at(row) then
+    local ft = math.floor(state.fuelTemp or 0)
+    local ct = math.floor(state.casingTemp or 0)
+    local ftStr = string.format("Fuel: %dC", ft)
+    local ctStr = string.format("Case: %dC", ct)
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write(ftStr:sub(1,6))
+    mon.setTextColor(tempColor(ft)); mon.write(tostring(ft).."C")
+    local half = math.floor(w/2)
+    mon.setTextColor(colors.gray); mon.setCursorPos(half+1, row); mon.write("Case: ")
+    mon.setTextColor(tempColor(ct)); mon.write(tostring(ct).."C")
+  end
+  row = row + 1
+
+  if at(row) then
+    local rxStr  = string.format("%.1f%%", state.reactivity or 0)
+    local fcStr  = string.format("%.3f mB/t", state.fuelConsumed or 0)
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row)
+    mon.write("React:")
+    mon.setTextColor(colors.cyan); mon.write(" "..rxStr)
+    mon.setTextColor(colors.gray)
+    local half = math.floor(w/2)
+    mon.setCursorPos(half+1, row); mon.write("Fuel/t:")
+    mon.setTextColor(colors.white); mon.write(" "..fcStr)
+  end
+  row = row + 1
+  sep(row); row = row + 1
+
+  -- Energy output + stored
+  if at(row) then
+    local isActive = cfg.coolingMode == "active"
+    local outLabel = isActive and "Output:" or "Output:"
+    local outVal   = isActive
+      and string.format("%.0f mB/t hot", state.energyLastTick or 0)
+      or  fmtFEt(state.energyLastTick or 0)
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write(outLabel.." ")
+    mon.setTextColor(colors.lime); mon.write(outVal:sub(1, w-9))
+  end
+  row = row + 1
+
+  if at(row) then
+    local ep = pct(state.energyStored or 0, state.energyCap or 1)
+    local capStr = fmtFE(state.energyCap or 0)
+    local storedStr = fmtFE(state.energyStored or 0)
+    local amtStr = storedStr.."/"..capStr
+    mon.setTextColor(colors.gray); mon.setCursorPos(1, row); mon.write("Stored:")
+    local col = ep > 30 and colors.cyan or ep > 10 and colors.yellow or colors.red
+    mon.setTextColor(col)
+    local bw = w - 8 - #amtStr - 1
+    mon.setCursorPos(8, row)
+    if bw > 2 then
+      mon.write("[" .. bar(state.energyStored or 0, state.energyCap or 1, bw) .. "]")
+    end
+    mon.setTextColor(colors.white)
+    mon.setCursorPos(w - #amtStr + 1, row); mon.write(amtStr:sub(1, w - 7))
+  end
+  row = row + 1
+  sep(row); row = row + 1
+
+  -- Auto-rod row
+  if at(row) then
+    local autoOn  = cfg.autoMode == true
+    local tgt     = cfg.autoTarget or AUTO_TARGET_DEF
+    local aLabel  = autoOn and "Auto: ON " or "Auto: OFF"
+    local aCol    = autoOn and colors.lime or colors.gray
+    mon.setTextColor(aCol)
+    mon.setCursorPos(1, row); mon.write(aLabel)
+    addHit(monName, 1, row, #aLabel, row, "toggle_auto")
+
+    if autoOn then
+      local tgtStr = " Tgt:"..fmtFEt(tgt)
+      mon.setTextColor(colors.white)
+      mon.write(tgtStr:sub(1, w - #aLabel - 7))
+    end
+
+    -- [-] [+] buttons at right
+    local plusX  = w - 2
+    local minusX = w - 6
+    mon.setTextColor(colors.lime)
+    writeAt(mon, plusX,  row, "[+]")
+    addHit(monName, plusX, row, w, row, "auto_plus")
+    mon.setTextColor(colors.red)
+    writeAt(mon, minusX, row, "[-]")
+    addHit(monName, minusX, row, minusX+2, row, "auto_minus")
+  end
+  row = row + 1
+
+  -- Footer credit
+  if at(h) then
+    local credit = "-- github.com/xransum"
+    mon.setTextColor(colors.gray)
+    mon.setCursorPos(math.max(1, math.floor((w - #credit)/2)+1), h)
+    mon.write(credit:sub(1, w))
+  end
+end
+
+-- ── draw: rods panel ──────────────────────────────────────────────────────────
+
+local function drawRods(mon, monName, startRow)
+  local w, h = mon.getSize()
+  local rodCount = state.rodCount or 0
+
+  -- Title
+  if startRow <= h then
+    mon.setTextColor(colors.yellow)
+    mon.setCursorPos(1, startRow); mon.write("CONTROL RODS")
+    -- ALL ▲ ▼
+    local allUpLabel   = "[A+]"
+    local allDownLabel = "[A-]"
+    local ax = w - #allUpLabel - #allDownLabel - 1
+    mon.setTextColor(colors.lime)
+    writeAt(mon, ax, startRow, allUpLabel)
+    addHit(monName, ax, startRow, ax + #allUpLabel - 1, startRow, "all_rods_up")
+    mon.setTextColor(colors.red)
+    writeAt(mon, ax + #allUpLabel + 1, startRow, allDownLabel)
+    addHit(monName, ax + #allUpLabel + 1, startRow, w, startRow, "all_rods_down")
+  end
+
+  local sepRow = startRow + 1
+  if sepRow <= h then drawSep(mon, w, sepRow) end
+
+  -- Footer rows (sep + auto status)
+  local footerSepRow = h - 1
+  local footerRow    = h
+  if footerSepRow > sepRow then drawSep(mon, w, footerSepRow) end
+  if footerRow <= h then
+    local autoStr = cfg.autoMode and "Auto: MANAGING RODS" or "Manual mode"
+    local autoCol = cfg.autoMode and colors.yellow or colors.gray
+    mon.setTextColor(autoCol)
+    mon.setCursorPos(1, footerRow); mon.write(autoStr:sub(1, w))
+    -- scroll arrows
+    local scrollUpX   = w - 5
+    local scrollDownX = w - 2
+    -- stored for hit detection further down
+    addHit(monName, scrollUpX,   footerRow, scrollUpX+2,   footerRow, "rod_scroll_up")
+    addHit(monName, scrollDownX, footerRow, scrollDownX+2, footerRow, "rod_scroll_down")
+  end
+
+  -- Content area for rods
+  local contentStart = sepRow + 1
+  local contentEnd   = footerSepRow > sepRow and footerSepRow - 1 or footerRow - 1
+  local contentRows  = math.max(0, contentEnd - contentStart + 1)
+
+  -- Each rod entry: "Rod NN  45% [+][-]"
+  -- Determine column layout
+  -- Min rod entry width: "R00 100%[+][-]" = 14 chars; with spacing = 15
+  local entryW = 15
+  local cols   = math.max(1, math.floor(w / entryW))
+  -- Actual entry width evenly distributed
+  local colW   = math.floor(w / cols)
+
+  local rowsNeeded = math.ceil(rodCount / cols)
+  local maxScroll  = math.max(0, rowsNeeded - contentRows)
+  rodScrollOffset  = clamp(rodScrollOffset, 0, maxScroll)
+
+  -- Draw scroll arrows if needed
+  if rowsNeeded > contentRows and footerRow <= h then
+    mon.setTextColor(rodScrollOffset > 0 and colors.white or colors.gray)
+    writeAt(mon, w-5, footerRow, "[^]")
+    mon.setTextColor(rodScrollOffset < maxScroll and colors.white or colors.gray)
+    writeAt(mon, w-2, footerRow, "[v]")
+  end
+
+  for rowIdx = 0, contentRows - 1 do
+    local gridRow  = rodScrollOffset + rowIdx
+    local screenRow = contentStart + rowIdx
+    if screenRow > contentEnd then break end
+    for colIdx = 0, cols - 1 do
+      local rodIdx = gridRow * cols + colIdx
+      if rodIdx >= rodCount then break end
+      local level    = (state.rodLevels and state.rodLevels[rodIdx]) or 0
+      local xStart   = colIdx * colW + 1
+      -- Rod label
+      local rodLabel = string.format("R%02d", rodIdx)
+      local levelStr = string.format("%3d%%", level)
+      mon.setTextColor(colors.cyan)
+      writeAt(mon, xStart, screenRow, rodLabel)
+      -- Level bar colour: low insertion = more output = lime; high = red
+      local lc = level < 40 and colors.lime or level < 75 and colors.yellow or colors.red
+      mon.setTextColor(lc)
+      writeAt(mon, xStart + 4, screenRow, levelStr)
+      -- [+] [-] buttons
+      local plusX  = xStart + 9
+      local minusX = xStart + 12
+      if plusX + 2 <= xStart + colW - 1 and not cfg.autoMode then
+        mon.setTextColor(colors.lime)
+        writeAt(mon, plusX, screenRow, "[+]")
+        addHit(monName, plusX, screenRow, plusX+2, screenRow, "rod_up_"..rodIdx)
+        if minusX + 2 <= xStart + colW - 1 then
+          mon.setTextColor(colors.red)
+          writeAt(mon, minusX, screenRow, "[-]")
+          addHit(monName, minusX, screenRow, minusX+2, screenRow, "rod_down_"..rodIdx)
+        end
+      elseif cfg.autoMode then
+        -- gray out when auto managing
+        mon.setTextColor(colors.gray)
+        if plusX + 2 <= xStart + colW - 1 then
+          writeAt(mon, plusX, screenRow, "[+]")
+        end
+      end
+    end
+  end
+end
+
+-- ── draw: scram panel ─────────────────────────────────────────────────────────
+
+local function drawScram(mon, monName, startRow)
+  local w, h = mon.getSize()
+  local midH  = math.floor((startRow + h) / 2)
+
+  if scramPending then
+    -- Confirmation overlay
+    local title1 = "!! CONFIRM EMERGENCY !!"
+    local title2 = "REACTOR SHUTDOWN"
+    centered(mon, w, midH - 2, title1, colors.red)
+    centered(mon, w, midH - 1, title2, colors.orange)
+
+    -- CONFIRM button (full width, green)
+    local confirmY = midH + 1
+    local cancelY  = midH + 3
+    local btnW     = w - 4
+
+    mon.setBackgroundColor(colors.green)
+    mon.setTextColor(colors.white)
+    local confirmLabel = string.rep(" ", math.floor((btnW-9)/2)).."[CONFIRM]"..string.rep(" ", math.ceil((btnW-9)/2))
+    mon.setCursorPos(3, confirmY)
+    mon.write(confirmLabel:sub(1, btnW))
+    mon.setBackgroundColor(colors.black)
+    addHit(monName, 1, confirmY, w, confirmY, "scram_confirm")
+
+    mon.setBackgroundColor(colors.gray)
+    mon.setTextColor(colors.white)
+    local cancelLabel = string.rep(" ", math.floor((btnW-8)/2)).."[CANCEL]"..string.rep(" ", math.ceil((btnW-8)/2))
+    mon.setCursorPos(3, cancelY)
+    mon.write(cancelLabel:sub(1, btnW))
+    mon.setBackgroundColor(colors.black)
+    addHit(monName, 1, cancelY, w, cancelY, "scram_cancel")
+
+  else
+    -- Normal SCRAM panel
+    local statusStr = state.active and "!! REACTOR ONLINE !!" or "-- REACTOR OFFLINE --"
+    local statusCol = state.active and colors.lime or colors.gray
+    centered(mon, w, midH - 2, statusStr, statusCol)
+
+    local outStr = state.active
+      and (cfg.coolingMode == "active"
+        and string.format("Output: %.0f mB/t", state.energyLastTick or 0)
+        or  "Output: "..fmtFEt(state.energyLastTick or 0))
+      or  "Output: ---"
+    centered(mon, w, midH - 1, outStr, colors.white)
+
+    -- Big SCRAM button
+    local scramY = midH + 1
+    local btnW   = w - 4
+    mon.setBackgroundColor(colors.red)
+    mon.setTextColor(colors.white)
+    local scramLabel = string.rep(" ", math.floor((btnW-8)/2)).."[SCRAM!]"..string.rep(" ", math.ceil((btnW-8)/2))
+    mon.setCursorPos(3, scramY)
+    mon.write(scramLabel:sub(1, btnW))
+    mon.setBackgroundColor(colors.black)
+    addHit(monName, 1, scramY, w, scramY, "scram_trigger")
+
+    -- ON / OFF buttons below SCRAM
+    if scramY + 2 <= h then
+      local onLabel  = "[ON]"
+      local offLabel = "[OFF]"
+      local spacing  = math.floor((w - #onLabel - #offLabel) / 3)
+      local onX      = spacing + 1
+      local offX     = onX + #onLabel + spacing
+      mon.setTextColor(state.active and colors.lime or colors.gray)
+      writeAt(mon, onX, scramY + 2, onLabel)
+      addHit(monName, onX, scramY+2, onX+#onLabel-1, scramY+2, "reactor_on")
+      mon.setTextColor(state.active and colors.gray or colors.red)
+      writeAt(mon, offX, scramY + 2, offLabel)
+      addHit(monName, offX, scramY+2, offX+#offLabel-1, scramY+2, "reactor_off")
+    end
+  end
+end
+
+-- ── master draw ───────────────────────────────────────────────────────────────
+
+local function drawAll()
+  local tabMon = singleTabMon()
+
+  if tabMon then
+    -- Single monitor tab mode
+    local monName = peripheral.getName(tabMon)
+    local w, h    = tabMon.getSize()
+    clearMon(tabMon)
+    clearHitboxes(monName)
+    drawTabStrip(tabMon, monName, w)
+    -- Content starts at row 3
+    local panel = PANELS[tabIndex]
+    if     panel == PANEL_DASHBOARD then drawDashboard(tabMon, monName, 3)
+    elseif panel == PANEL_RODS      then drawRods(tabMon, monName, 3)
+    elseif panel == PANEL_SCRAM     then drawScram(tabMon, monName, 3)
+    end
+  else
+    -- Multi-monitor mode
+    local warnedMissing = {}
+    for _, panel in ipairs(PANELS) do
+      local name = cfg[panel]
+      if name then
+        if peripheral.isPresent(name) then
+          local mon = peripheral.wrap(name)
+          clearMon(mon)
+          clearHitboxes(name)
+          if     panel == PANEL_DASHBOARD then drawDashboard(mon, name, 1)
+          elseif panel == PANEL_RODS      then drawRods(mon, name, 1)
+          elseif panel == PANEL_SCRAM     then drawScram(mon, name, 1)
+          end
+        elseif not warnedMissing[name] then
+          warnedMissing[name] = true
+          printError("Monitor "..name.." ("..panel..") not found — panel disabled.")
+        end
+      end
+    end
+
+    -- Any monitors not assigned get a "not assigned" message
+    local allMons = getMonitors()
+    local assigned = {}
+    for _, p in ipairs(PANELS) do
+      if cfg[p] then assigned[cfg[p]] = true end
+    end
+    for _, m in ipairs(allMons) do
+      if not assigned[m.name] then
+        m.mon.setBackgroundColor(colors.black)
+        m.mon.clear()
+        m.mon.setTextColor(colors.gray)
+        local w = m.mon.getSize()
+        centered(m.mon, w, 2, "Not assigned", colors.gray)
+        centered(m.mon, w, 3, "Run: reactor setup", colors.gray)
+      end
+    end
+  end
+end
+
+-- ── action handler ────────────────────────────────────────────────────────────
+
+local function handleAction(action)
+  if action == "reactor_on" then
+    pcall(reactor.setActive, true)
+    playSound(SND_ON)
+
+  elseif action == "reactor_off" then
+    pcall(reactor.setActive, false)
+    playSound(SND_OFF)
+
+  elseif action == "toggle_auto" then
+    cfg.autoMode = not cfg.autoMode
+    saveCfg()
+    playSound(cfg.autoMode and SND_ON or SND_OFF)
+
+  elseif action == "auto_plus" then
+    cfg.autoTarget = (cfg.autoTarget or AUTO_TARGET_DEF) + 500
+    saveCfg()
+    playSound(SND_ROD)
+
+  elseif action == "auto_minus" then
+    cfg.autoTarget = math.max(0, (cfg.autoTarget or AUTO_TARGET_DEF) - 500)
+    saveCfg()
+    playSound(SND_ROD)
+
+  elseif action == "all_rods_up" then
+    if cfg.autoMode then cfg.autoMode = false; saveCfg() end
+    local lvl = state.rodLevels and state.rodLevels[0] or 50
+    pcall(reactor.setAllControlRodLevels, clamp(lvl - ROD_STEP, 0, 100))
+    playSound(SND_ROD)
+
+  elseif action == "all_rods_down" then
+    if cfg.autoMode then cfg.autoMode = false; saveCfg() end
+    local lvl = state.rodLevels and state.rodLevels[0] or 50
+    pcall(reactor.setAllControlRodLevels, clamp(lvl + ROD_STEP, 0, 100))
+    playSound(SND_ROD)
+
+  elseif action == "rod_scroll_up" then
+    rodScrollOffset = math.max(0, rodScrollOffset - 1)
+
+  elseif action == "rod_scroll_down" then
+    rodScrollOffset = rodScrollOffset + 1  -- clamped in drawRods
+
+  elseif action:sub(1, 7) == "rod_up_" then
+    if cfg.autoMode then cfg.autoMode = false; saveCfg() end
+    local idx = tonumber(action:sub(8))
+    if idx then
+      local lvl = (state.rodLevels and state.rodLevels[idx]) or 50
+      pcall(reactor.setControlRodLevel, idx, clamp(lvl - ROD_STEP, 0, 100))
+      playSound(SND_ROD)
+    end
+
+  elseif action:sub(1, 9) == "rod_down_" then
+    if cfg.autoMode then cfg.autoMode = false; saveCfg() end
+    local idx = tonumber(action:sub(10))
+    if idx then
+      local lvl = (state.rodLevels and state.rodLevels[idx]) or 50
+      pcall(reactor.setControlRodLevel, idx, clamp(lvl + ROD_STEP, 0, 100))
+      playSound(SND_ROD)
+    end
+
+  elseif action:sub(1,4) == "tab_" then
+    local i = tonumber(action:sub(5))
+    if i then tabIndex = i end
+
+  elseif action == "scram_trigger" then
+    scramPending = true
+    playSound(SND_ALARM)
+
+  elseif action == "scram_confirm" then
+    executeScram()
+
+  elseif action == "scram_cancel" then
+    cancelScram()
+    playSound(SND_CONFIRM)
+  end
+
+  -- Always redraw after action
+  pollReactor()
+  drawAll()
+end
+
+-- ── interactive setup ─────────────────────────────────────────────────────────
+
+local function runSetup()
+  term.clear()
+  term.setCursorPos(1,1)
+  print("=== Reactor Monitor Setup ===")
+  print("")
+
+  -- Detect reactor info
+  local rodCount    = pcall(reactor.getNumberOfControlRods) and reactor.getNumberOfControlRods() or "?"
+  local activeCool  = pcall(reactor.isActivelyCooled) and reactor.isActivelyCooled() or false
+  local defaultMode = activeCool and "active" or "passive"
+  print("Reactor: extremereactor-reactorComputerPort")
+  print("Rods: "..tostring(rodCount).."   Cooling: "..defaultMode.." (auto-detected)")
+  print("Speaker: "..(speaker and "found" or "not found"))
+  print("")
+
+  -- List monitors
+  local mons = getMonitors()
+  if #mons == 0 then
+    printError("No monitors found! Attach at least one Advanced Monitor.")
+    return false
+  end
+
+  print("Monitors detected:")
+  for i, m in ipairs(mons) do
+    local w, h = m.mon.getSize()
+    print(string.format("  [%d] %-12s %d x %d", i, m.name, w, h))
+  end
+  print("")
+
+  local newCfg = {}
+
+  if #mons == 1 then
+    print("1 monitor detected -> running in single-monitor tab mode.")
+    newCfg.dashboard = mons[1].name
+    newCfg.rods      = mons[1].name
+    newCfg.scram     = mons[1].name
+  else
+    local function pickMon(label)
+      while true do
+        io.write("  "..label.." [1-"..#mons.."/none]: ")
+        local line = read()
+        if line == "" or line == "none" then return nil end
+        local n = tonumber(line)
+        if n and mons[n] then return mons[n].name end
+        print("  Invalid choice.")
+      end
+    end
+    print("Assign panels (Enter or 'none' to leave unassigned):")
+    newCfg.dashboard = pickMon("Dashboard")
+    newCfg.rods      = pickMon("Rods     ")
+    newCfg.scram     = pickMon("SCRAM    ")
+    print("")
+  end
+
+  -- Cooling mode
+  io.write("Cooling mode [p=passive / a=active, default="..defaultMode:sub(1,1).."]: ")
+  local modeIn = read()
+  if modeIn == "a" then newCfg.coolingMode = "active"
+  else newCfg.coolingMode = "passive" end
+
+  -- Auto-rod target
+  io.write("Auto-rod target FE/t [0=disabled, default="..AUTO_TARGET_DEF.."]: ")
+  local tgtIn = read()
+  local tgt = tonumber(tgtIn)
+  if tgt and tgt > 0 then
+    newCfg.autoTarget = tgt
+    newCfg.autoMode   = true
+  else
+    newCfg.autoTarget = AUTO_TARGET_DEF
+    newCfg.autoMode   = false
+  end
+
+  cfg = newCfg
+  saveCfg()
+  playSound(SND_CONFIRM)
+  print("")
+  print("Config saved. Starting...")
+  sleep(0.5)
+  return true
+end
+
+-- ── CLI commands ──────────────────────────────────────────────────────────────
+
+local args = { ... }
+
+if args[1] == "setup" then
+  runSetup()
+
+elseif args[1] == "status" then
+  pollReactor()
+  print(string.format("Active:    %s", tostring(state.active)))
+  print(string.format("FE/t:      %s", fmtFEt(state.energyLastTick or 0)))
+  print(string.format("Stored:    %s / %s", fmtFE(state.energyStored or 0), fmtFE(state.energyCap or 0)))
+  print(string.format("Fuel:      %d / %d mB (%d%%)", state.fuelAmt or 0, state.fuelMax or 0, pct(state.fuelAmt or 0, state.fuelMax or 1)))
+  print(string.format("Waste:     %d mB", state.wasteAmt or 0))
+  print(string.format("Fuel Temp: %dC   Casing: %dC", math.floor(state.fuelTemp or 0), math.floor(state.casingTemp or 0)))
+  print(string.format("Rods:      %d", state.rodCount or 0))
+  return
+
+elseif args[1] == "scram" then
+  print("SCRAM initiated from terminal.")
+  executeScram()
+  return
+
+elseif args[1] == "on" then
+  pcall(reactor.setActive, true)
+  print("Reactor ON.")
+  return
+
+elseif args[1] == "off" then
+  pcall(reactor.setActive, false)
+  print("Reactor OFF.")
+  return
+
+elseif args[1] == "rods" then
+  local lvl = tonumber(args[2])
+  if lvl then
+    lvl = clamp(lvl, 0, 100)
+    pcall(reactor.setAllControlRodLevels, lvl)
+    print("All rods set to "..lvl.."%")
+  else
+    printError("Usage: reactor rods <0-100>")
+  end
+  return
+
+elseif args[1] == "mode" then
+  if args[2] == "passive" or args[2] == "active" then
+    cfg.coolingMode = args[2]
+    saveCfg()
+    print("Cooling mode set to "..args[2])
+  else
+    printError("Usage: reactor mode passive|active")
+  end
+  return
+end
+
+-- ── first-boot setup check ────────────────────────────────────────────────────
+
+if not fs.exists(CFG_FILE) then
+  local ok = runSetup()
+  if not ok then return end
+end
+
+-- Reload cfg (may have been written by setup)
+cfg = loadTable(CFG_FILE, {
+  coolingMode = "passive",
+  autoMode    = false,
+  autoTarget  = AUTO_TARGET_DEF,
+})
+
+-- ── main event loop ───────────────────────────────────────────────────────────
+
+print("Reactor monitor running. Press Ctrl+T to stop.")
+print("Run 'reactor setup' to reconfigure.")
+
+pollReactor()
+drawAll()
+
+local drawTimer = os.startTimer(DRAW_INTERVAL)
+local autoTimer = os.startTimer(AUTO_INTERVAL)
+
+while true do
+  local evt, p1, p2, p3 = os.pullEvent()
+
+  if evt == "timer" then
+    if p1 == drawTimer then
+      pollReactor()
+      drawAll()
+      drawTimer = os.startTimer(DRAW_INTERVAL)
+    elseif p1 == autoTimer then
+      autoAdjustRods()
+      autoTimer = os.startTimer(AUTO_INTERVAL)
+    end
+
+  elseif evt == "monitor_touch" then
+    local action = hitTest(p1, p2, p3)
+    if action then handleAction(action) end
+
+  elseif evt == "monitor_resize" or evt == "term_resize" then
+    drawAll()
+  end
+end
