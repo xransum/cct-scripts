@@ -11,6 +11,7 @@
 
 local REFRESH             = 1          -- seconds between redraws (1s keeps the clock live)
 local CFG_FILE            = "server_stats.cfg"
+local SEED_FILE           = "server_stats_seed.cfg"  -- one-shot bootstrap; deleted after read
 local REBOOT_THRESHOLD_MS = 90 * 1000  -- gap < 90 s → computer reboot; ≥ 90 s → server restart
 
 -- ── peripheral ───────────────────────────────────────────────────────────────
@@ -46,7 +47,25 @@ local now = os.epoch("utc")
 local cfg = loadCfg()
 local totalAccumulatedMs, serverSessionStartMs
 
-if cfg and cfg.lastHeartbeatMs and (now - cfg.lastHeartbeatMs) < REBOOT_THRESHOLD_MS then
+-- One-shot seed file: if present, use its serverStartMs to bootstrap the correct
+-- server start epoch (e.g. injected after deploy to fix a wrong sessionStartMs).
+-- The file is deleted immediately after reading so it only fires once.
+local seedCfg
+if fs.exists(SEED_FILE) then
+  local sf = fs.open(SEED_FILE, "r")
+  local raw = sf.readAll(); sf.close()
+  local ok, t = pcall(textutils.unserialize, raw)
+  seedCfg = (ok and type(t) == "table") and t or nil
+  fs.delete(SEED_FILE)
+  print("Seed file applied and removed.")
+end
+
+if seedCfg and seedCfg.serverStartMs then
+  -- Seed override: use the provided epoch as the true server session start.
+  -- Keep any previously accumulated total; do not credit the (wrong) old session.
+  totalAccumulatedMs   = (cfg and cfg.totalMs or 0)
+  serverSessionStartMs = seedCfg.serverStartMs
+elseif cfg and cfg.lastHeartbeatMs and (now - cfg.lastHeartbeatMs) < REBOOT_THRESHOLD_MS then
   -- Computer reboot: resume the existing server session
   totalAccumulatedMs   = cfg.totalMs        or 0
   serverSessionStartMs = cfg.sessionStartMs or now

@@ -131,7 +131,8 @@ end
 
 -- ── UI state ─────────────────────────────────────────────────────────────────
 
-local itemRows = {}
+local itemRows       = {}   -- row → item index (every row of a wrapped item)
+local itemDeleteRows = {}   -- row → true only for rows that display [X]
 local addButtonRow, clearButtonRow
 local yesButtonRow, noButtonRow, yesButtonCol, noButtonCol
 local modeTagX, modeTagLen   -- position of the tappable mode tag on row 1
@@ -143,7 +144,8 @@ local restartRequested = false
 
 local function drawList()
   local w, h = mon.getSize()
-  itemRows = {}
+  itemRows       = {}
+  itemDeleteRows = {}
 
   -- Title, left-center
   mon.setTextColor(colors.yellow)
@@ -170,6 +172,10 @@ local function drawList()
 
   local row        = 3
   local maxItemRow = h - 2
+  -- [X] sits at cols w-3..w-1; 1-col gap → text ends at col w-4.
+  -- "[ ] " prefix is 4 chars starting at col 2, so first-line text width = w-9.
+  -- Continuation lines have no [X], but we keep the same width for alignment.
+  local textWidth = math.max(1, w - 9)
 
   if #todos == 0 then
     mon.setCursorPos(2, row)
@@ -178,19 +184,31 @@ local function drawList()
   else
     for i, item in ipairs(todos) do
       if row > maxItemRow then break end
+      local prefix = item.done and "[x] " or "[ ] "
+      local textColor = item.done and colors.green or colors.white
+      local wrapped = wordWrap(item.text, textWidth)
+      if #wrapped == 0 then wrapped = {""} end
+
+      -- First row: prefix + first line of text + [X]
       mon.setCursorPos(2, row)
-      if item.done then
-        mon.setTextColor(colors.green)
-        mon.write(string.format("[x] %s", item.text))
-      else
-        mon.setTextColor(colors.white)
-        mon.write(string.format("[ ] %s", item.text))
-      end
+      mon.setTextColor(textColor)
+      mon.write(prefix .. wrapped[1])
       mon.setTextColor(colors.red)
       mon.setCursorPos(w - 3, row)
       mon.write("[X]")
-      itemRows[row] = i
+      itemRows[row]       = i
+      itemDeleteRows[row] = true
       row = row + 1
+
+      -- Continuation rows: 4-space indent aligned with text after prefix
+      for l = 2, #wrapped do
+        if row > maxItemRow then break end
+        mon.setCursorPos(6, row)
+        mon.setTextColor(textColor)
+        mon.write(wrapped[l])
+        itemRows[row] = i
+        row = row + 1
+      end
     end
   end
 
@@ -423,7 +441,7 @@ local function handleTouch(x, y)
 
     local index = itemRows[y]
     if index and todos[index] then
-      if x >= (w - 3) and x <= w then
+      if x >= (w - 3) and x <= w and itemDeleteRows[y] then
         table.remove(todos, index)
         saveTodos()
         broadcast()
