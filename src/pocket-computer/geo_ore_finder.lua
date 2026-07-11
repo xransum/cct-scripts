@@ -24,7 +24,7 @@
 
 -- ── config ────────────────────────────────────────────────────────────────────
 
-local SCAN_RADIUS = 8   -- higher = more FE per scan
+local SCAN_RADIUS = 16   -- max free=8, max paid=64 (server config); higher costs more FE
 
 -- Highlighted red and sorted to the top of results
 local SPECIAL = {
@@ -143,7 +143,12 @@ local function doScan()
 
   local ok, data = pcall(scanner.scan, SCAN_RADIUS)
   if not ok or type(data) ~= "table" then
-    scanMsg = "Scan error: " .. tostring(data):sub(1, 18)
+    local errStr = tostring(data)
+    if errStr:find("radius") or errStr:find("range") or errStr:find("too") then
+      scanMsg = "Radius " .. SCAN_RADIUS .. " exceeds server max!"
+    else
+      scanMsg = "Scan error: " .. errStr:sub(1, 20)
+    end
     return false
   end
 
